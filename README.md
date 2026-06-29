@@ -175,7 +175,7 @@ MIT License
 
 ## 📧 Support
 
-For support, email: vijay@python-leetcode.com
+For support, email: vijaykumarjoshi123@gmail.com
 
 ---
 

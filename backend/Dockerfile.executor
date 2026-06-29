@@ -1,0 +1,15 @@
+FROM nvidia/cuda:12.2.0-base-ubuntu22.04
+
+# Install Python and basic dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install RAPIDS cuDF (standard for GPU dataframes)
+# Note: In a real production env, we'd use the official RAPIDS image
+# but for this sandbox, we ensure the basics are here.
+RUN pip3 install cudf-cu12 --extra-index-url=https://pypi.nvidia.com
+
+WORKDIR /sandbox
+USER 1000

@@ -26,6 +26,9 @@ const submissionRoutes = require('./routes/submissions');
 const leaderboardRoutes = require('./routes/leaderboard');
 const forumRoutes = require('./routes/forum');
 
+// Initialize Submission Queue Worker
+require('./services/submissionQueue');
+
 app.use('/api/auth', authRoutes);
 app.use('/api/problems', problemRoutes);
 app.use('/api/submissions', submissionRoutes);

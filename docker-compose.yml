@@ -10,16 +10,23 @@ services:
     volumes:
       - mongodb_data:/data/db
 
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
   backend:
     build: ./backend
     ports:
       - "5000:5000"
     environment:
       MONGODB_URI: mongodb://mongodb:27017/python-leetcode
+      REDIS_URL: redis://redis:6379
       JWT_SECRET: dev_secret_key
       NODE_ENV: development
     depends_on:
       - mongodb
+      - redis
     volumes:
       - ./backend:/app
 
