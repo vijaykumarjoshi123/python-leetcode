@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const VALID_TRACKS = ['foundations', 'data-engineering', 'streaming', 'orchestration', 'lakehouse'];
+
 const userSchema = new mongoose.Schema({
   username: { type: String, unique: true, required: true },
   email: { type: String, unique: true, required: true },
@@ -14,6 +16,22 @@ const userSchema = new mongoose.Schema({
     mediumCount: { type: Number, default: 0 },
     hardCount: { type: Number, default: 0 }
   },
+  // Track-aware solve counts. Powers the per-track profile radar and the
+  // certificate eligibility check. Keys mirror VALID_TRACKS but are spelled
+  // out so Mongoose picks them up as proper schema paths (dynamic keys via
+  // [key] would still work but are less greppable).
+  solvedByTrack: {
+    foundations: { type: Number, default: 0 },
+    'data-engineering': { type: Number, default: 0 },
+    streaming: { type: Number, default: 0 },
+    orchestration: { type: Number, default: 0 },
+    lakehouse: { type: Number, default: 0 },
+  },
+  certificates: [{
+    track: { type: String, enum: VALID_TRACKS },
+    awardedAt: { type: Date },
+    problemCount: { type: Number },
+  }],
   solvedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problem' }],
   attemptedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problem' }]
 });

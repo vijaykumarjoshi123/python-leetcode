@@ -2,12 +2,16 @@
 // Adding a new tool means adding a new entry here. The router is the
 // single source of truth for how a submission is dispatched.
 
+// `buildCmd` returns an argv array (NOT a shell string) so it can be passed
+// directly to `docker run <image> ...args` without any quoting concerns.
+// Adding a new tool means adding a new entry here. The router is the single
+// source of truth for how a submission is dispatched.
 const EXECUTOR_CONFIG = {
   python: {
     image: 'python-executor',
-    // The worker's run command. `file` is the absolute path to the
-    // mounted source file inside the container.
-    buildCmd: (file) => `python3 ${file}`,
+    // The worker's run argv. `file` is the absolute path to the mounted
+    // source file inside the container.
+    buildCmd: (file) => ['python3', file],
     timeout: 5000,
     memoryMb: 256,
     toolVersion: 'Python 3.11',
@@ -17,7 +21,7 @@ const EXECUTOR_CONFIG = {
     image: 'duckdb-executor',
     // SQL submissions are still injected as a .sql file but the runner
     // is a Python wrapper that loads fixtures and runs the SQL via DuckDB.
-    buildCmd: (file) => `python3 /runner/sql_runner.py ${file}`,
+    buildCmd: (file) => ['python3', '/runner/sql_runner.py', file],
     timeout: 10000,
     memoryMb: 256,
     toolVersion: 'DuckDB 0.10 (Snowflake-compatible SQL)',
@@ -25,7 +29,9 @@ const EXECUTOR_CONFIG = {
   },
   pyspark: {
     image: 'pyspark-executor',
-    buildCmd: (file) => `spark-submit --master 'local[2]' --driver-memory 512m ${file}`,
+    // The runner handles the full lifecycle (copy file, spark-submit, capture
+    // stdout, compare /tmp/output/ to /expected/, write JSON). See Section 3B.
+    buildCmd: (file) => ['bash', '/runner/spark_runner.sh', file],
     timeout: 60000,
     memoryMb: 1024,
     toolVersion: 'PySpark 3.5',
@@ -33,7 +39,7 @@ const EXECUTOR_CONFIG = {
   },
   dbt: {
     image: 'dbt-executor',
-    buildCmd: (file) => `bash /runner/dbt_runner.sh ${file}`,
+    buildCmd: (file) => ['bash', '/runner/dbt_runner.sh', file],
     timeout: 30000,
     memoryMb: 512,
     toolVersion: 'dbt-core 1.7 (DuckDB adapter)',
@@ -41,7 +47,7 @@ const EXECUTOR_CONFIG = {
   },
   airflow: {
     image: 'airflow-executor',
-    buildCmd: (file) => `python3 /runner/airflow_runner.py ${file}`,
+    buildCmd: (file) => ['python3', '/runner/airflow_runner.py', file],
     timeout: 30000,
     memoryMb: 512,
     toolVersion: 'Apache Airflow 2.9',
@@ -49,7 +55,7 @@ const EXECUTOR_CONFIG = {
   },
   kafka: {
     image: 'kafka-executor',
-    buildCmd: (file) => `bash /runner/kafka_runner.sh ${file}`,
+    buildCmd: (file) => ['bash', '/runner/kafka_runner.sh', file],
     timeout: 30000,
     memoryMb: 512,
     toolVersion: 'Kafka 3.7 (KRaft mode)',
@@ -57,7 +63,9 @@ const EXECUTOR_CONFIG = {
   },
   iceberg: {
     image: 'iceberg-executor',
-    buildCmd: (file) => `python3 ${file}`,
+    // The runner handles fixture setup, user script execution, and
+    // comparison against /expected/. See Section 3F.
+    buildCmd: (file) => ['python3', '/runner/iceberg_runner.py'],
     timeout: 30000,
     memoryMb: 512,
     toolVersion: 'PyIceberg 0.7 / DuckDB (Databricks-Iceberg)',

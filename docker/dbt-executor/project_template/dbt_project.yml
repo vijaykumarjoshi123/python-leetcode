@@ -1,0 +1,22 @@
+name: 'sandbox'
+version: '1.0.0'
+config-version: 2
+
+profile: 'dev'
+
+# The user's submitted model is dropped into models/staging/solution.sql.
+# They can also drop a schema.yml into models/staging/ to declare tests.
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dev.duckdb"
+
+models:
+  sandbox:
+    staging:
+      +materialized: view

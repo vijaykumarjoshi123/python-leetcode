@@ -2,25 +2,33 @@ const express = require('express');
 const Submission = require('../models/Submission');
 const Problem = require('../models/Problem');
 const User = require('../models/User');
-const { executeCode } = require('../services/pythonExecutor');
-
-const router = express.Router();
-
-const express = require('express');
-const Submission = require('../models/Submission');
-const Problem = require('../models/Problem');
-const User = require('../models/User');
 const { submissionQueue } = require('../services/submissionQueue');
+const { isValidExecutorType, VALID_EXECUTOR_TYPES } = require('../services/executorRouter');
 
 const router = express.Router();
 
 // Submit code for execution
 router.post('/submit', async (req, res) => {
   try {
-    const { userId, problemId, code, language = 'python' } = req.body;
+    const {
+      userId,
+      problemId,
+      code,
+      language = 'python',
+      executorType,
+    } = req.body;
 
     if (!userId || !problemId || !code) {
       return res.status(400).json({ error: 'userId, problemId, and code are required' });
+    }
+
+    // Validate executorType against the whitelist exposed by the router.
+    // Default to 'python' when absent so existing callers keep working.
+    const resolvedExecutorType = executorType === undefined ? 'python' : executorType;
+    if (!isValidExecutorType(resolvedExecutorType)) {
+      return res.status(400).json({
+        error: `Invalid executorType "${resolvedExecutorType}". Allowed: ${VALID_EXECUTOR_TYPES.join(', ')}`,
+      });
     }
 
     // Get problem
@@ -37,7 +45,8 @@ router.post('/submit', async (req, res) => {
       problemId,
       code,
       language,
-      status: 'Pending'
+      executorType: resolvedExecutorType,
+      status: 'Pending',
     });
 
     await submission.save();
@@ -49,8 +58,12 @@ router.post('/submit', async (req, res) => {
       await user.save();
     }
 
-    // Queue the execution asynchronously
-    await submissionQueue.add('execute-code', { submissionId: submission._id });
+    // Queue the execution asynchronously. executorType is included in the
+    // job payload so the worker (Section 1D) can route to the right image.
+    await submissionQueue.add('execute-code', {
+      submissionId: submission._id,
+      executorType: resolvedExecutorType,
+    });
 
     res.json(submission);
   } catch (err) {
@@ -85,8 +98,8 @@ router.get('/problem/:problemId/user/:userId', async (req, res) => {
       problemId: req.params.problemId,
       userId: req.params.userId
     })
-      .sort({ submittedAt: -1 })
-      .limit(10);
+    .sort({ submittedAt: -1 })
+    .limit(10);
 
     res.json(submissions);
   } catch (err) {

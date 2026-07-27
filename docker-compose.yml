@@ -43,5 +43,40 @@ services:
     volumes:
       - ./frontend:/app
 
+  # Executor images. Each is built once and tagged as a stable name the
+  # backend worker spawns on demand via `docker run`. They are NOT run as
+  # services — adding `profiles:` keeps `docker-compose up` from starting
+  # six idle containers. To build all images explicitly:
+  #   docker-compose -f docker-compose.yml -f docker-compose.build.yml build
+  duckdb-executor:
+    build: ./docker/duckdb-executor
+    image: duckdb-executor:latest
+    profiles: ["build"]
+
+  pyspark-executor:
+    build: ./docker/pyspark-executor
+    image: pyspark-executor:latest
+    profiles: ["build"]
+
+  dbt-executor:
+    build: ./docker/dbt-executor
+    image: dbt-executor:latest
+    profiles: ["build"]
+
+  airflow-executor:
+    build: ./docker/airflow-executor
+    image: airflow-executor:latest
+    profiles: ["build"]
+
+  kafka-executor:
+    build: ./docker/kafka-executor
+    image: kafka-executor:latest
+    profiles: ["build"]
+
+  iceberg-executor:
+    build: ./docker/iceberg-executor
+    image: iceberg-executor:latest
+    profiles: ["build"]
+
 volumes:
   mongodb_data:

@@ -1,0 +1,10 @@
+# dbt profile for the sandbox. DuckDB adapter, no credentials.
+# The warehouse file is stored alongside the dbt project so the runner can
+# clean it up between attempts without polluting the image.
+dev:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: /project/dev.duckdb
+      threads: 2

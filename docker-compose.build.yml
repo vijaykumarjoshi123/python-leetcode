@@ -1,0 +1,26 @@
+# Build-only override. Combines with docker-compose.yml to make the six
+# executor images addressable without running anything:
+#
+#   docker-compose -f docker-compose.yml -f docker-compose.build.yml build
+#
+# This sets the "build" profile, which selects the executor services that
+# were tagged with `profiles: ["build"]` in docker-compose.yml. Running
+# `docker-compose up` alone will NOT start them.
+services:
+  duckdb-executor:
+    profiles: ["build"]
+
+  pyspark-executor:
+    profiles: ["build"]
+
+  dbt-executor:
+    profiles: ["build"]
+
+  airflow-executor:
+    profiles: ["build"]
+
+  kafka-executor:
+    profiles: ["build"]
+
+  iceberg-executor:
+    profiles: ["build"]

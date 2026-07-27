@@ -2,56 +2,73 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { getExecutorConfig, isValidExecutorType } = require('./executorRouter');
 
 /**
- * Execute Python code against test cases using a real Python subprocess.
- * Returns detailed per-test-case results with timing and memory info.
+ * Execute user-submitted code against test cases inside the appropriate
+ * Docker sandbox (python, sql, pyspark, dbt, airflow, kafka, iceberg).
+ *
+ * The image, run command, timeout, and memory limit are resolved from the
+ * executorRouter so adding a new tool means adding a new entry there only.
+ *
+ * Returns a summary object whose `results` array preserves the original
+ * per-test-case shape (so existing callers like submissionQueue that index
+ * `results[i].passed` / `.runtime` / `.error` keep working) plus
+ * submission-level fields the queue needs to persist.
+ *
+ *   {
+ *     executorType, toolVersion, executionRuntime, results,
+ *     passed, totalTestCases, firstError
+ *   }
  */
-const TIME_LIMIT_MS = 5000; // 5 second timeout
+async function executeCode(code, testCases, executorType = 'python') {
+  const config = getExecutorConfig(executorType);
 
-async function executeCode(code, testCases) {
+  const overallStart = process.hrtime.bigint();
   const results = [];
 
   for (let i = 0; i < testCases.length; i++) {
     const testCase = testCases[i];
-    const result = await runSingleTestCase(code, testCase, i);
+    const result = await runSingleTestCase(code, testCase, i, config);
     results.push(result);
   }
 
-  return results;
-}
+  const overallEnd = process.hrtime.bigint();
+  const executionRuntimeMs = Number(overallEnd - overallStart) / 1_000_000;
 
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
-/**
- * Execute Python code against test cases using a Docker sandbox.
- * Returns detailed per-test-case results with timing and memory info.
- */
-const TIME_LIMIT_MS = 5000; // 5 second timeout
-
-async function executeCode(code, testCases) {
-  const results = [];
-
-  for (let i = 0; i < testCases.length; i++) {
-    const testCase = testCases[i];
-    const result = await runSingleTestCase(code, testCase, i);
-    results.push(result);
+  let passed = 0;
+  let firstError = null;
+  for (const r of results) {
+    if (r.passed) passed++;
+    else if (!firstError && r.error) firstError = r.error;
   }
 
-  return results;
+  return {
+    executorType,
+    toolVersion: config.toolVersion,
+    executionRuntime: Math.round(executionRuntimeMs * 100) / 100,
+    results,
+    passed,
+    totalTestCases: results.length,
+    firstError,
+  };
 }
 
-function runSingleTestCase(code, testCase, index) {
+function runSingleTestCase(code, testCase, index, config) {
   return new Promise((resolve) => {
     const startTime = process.hrtime.bigint();
 
-    const wrappedCode = wrapCodeForExecution(code, testCase.input);
+    // Each tool has its own submission-file extension. Default to .py because
+    // it's the most common; the router can override via a future
+    // `fileExt` field if needed. For now the run command treats the path as
+    // opaque, so extension is purely cosmetic.
+    const extension = pickExtension(config.image);
     const tmpDir = os.tmpdir();
-    const tmpFile = path.join(tmpDir, `lc_exec_${Date.now()}_${index}_${Math.random().toString(36).slice(2)}.py`);
-    fs.writeFileSync(tmpFile, wrappedCode, 'utf-8');
+    const tmpFile = path.join(
+      tmpDir,
+      `lc_exec_${Date.now()}_${index}_${Math.random().toString(36).slice(2)}${extension}`
+    );
+    fs.writeFileSync(tmpFile, code, 'utf-8');
 
     let timedOut = false;
     let stdout = '';
@@ -60,27 +77,36 @@ function runSingleTestCase(code, testCase, index) {
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill('SIGKILL');
-    }, TIME_LIMIT_MS);
+    }, config.timeout);
 
-    // Production-grade Sandboxing: Run in a Docker container
-    // --rm: remove container after run
-    // --net none: disable network access to prevent SSRF/Exfiltration
-    // --memory: limit RAM
-    // --cpus: limit CPU
-    // --gpus all: provide GPU access for cuDF/cuOpt acceleration
-    // -v: mount only the specific temp file as read-only
-    const proc = spawn('docker', [
+    // Production-grade sandboxing:
+    //   --rm           remove container after run
+    //   --net none     disable network access to prevent SSRF/exfiltration
+    //   --memory       limit RAM (from router config — Spark needs 1GB+)
+    //   --cpus         limit CPU
+    //   --gpus all     only when the executor declares useGpu (router-driven)
+    //   -v             mount the specific temp file as read-only
+    const dockerArgs = [
       'run', '--rm',
-      '--gpus', 'all',
       '--net', 'none',
-      '--memory', '1g', // Increased memory for GPU workloads
-      '--cpus', '1.0',  // Increased CPU for GPU coordination
-      '-v', `${tmpFile}:/sandbox/solution.py:ro`,
-      'python-executor',
-      'python3', '/sandbox/solution.py'
-    ], {
+      '--memory', `${config.memoryMb}m`,
+      '--cpus', '1.0',
+      '-v', `${tmpFile}:/sandbox/solution${extension}:ro`,
+    ];
+
+    if (config.useGpu) {
+      dockerArgs.push('--gpus', 'all');
+    }
+
+    // The image name and the run argv both come from the router so a new
+    // executor type doesn't need a code change here. buildCmd already returns
+    // an argv array — no shell quoting required.
+    const inContainerPath = `/sandbox/solution${extension}`;
+    dockerArgs.push(config.image, ...config.buildCmd(inContainerPath));
+
+    const proc = spawn('docker', dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
 
     proc.stdout.on('data', (data) => {
@@ -94,8 +120,7 @@ function runSingleTestCase(code, testCase, index) {
     proc.on('close', (exitCode) => {
       clearTimeout(timer);
       const endTime = process.hrtime.bigint();
-      const runtimeNs = endTime - startTime;
-      const runtimeMs = Number(runtimeNs) / 1_000_000;
+      const runtimeMs = Number(endTime - startTime) / 1_000_000;
 
       try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
 
@@ -106,8 +131,8 @@ function runSingleTestCase(code, testCase, index) {
           actual: null,
           passed: false,
           error: 'Time Limit Exceeded',
-          runtime: TIME_LIMIT_MS,
-          memory: 0
+          runtime: config.timeout,
+          memory: 0,
         });
         return;
       }
@@ -115,7 +140,7 @@ function runSingleTestCase(code, testCase, index) {
       if (exitCode !== 0 || stderr) {
         const cleanedStderr = stderr
           .replace(/File ".*", line \d+/g, 'File "<your code>"')
-          .replace(new RegExp('/sandbox/solution.py', 'g'), '<your code>')
+          .replace(new RegExp(inContainerPath.replace(/\./g, '\\.'), 'g'), '<your code>')
           .trim();
         resolve({
           input: testCase.input,
@@ -124,7 +149,7 @@ function runSingleTestCase(code, testCase, index) {
           passed: false,
           error: cleanedStderr || `Exit code: ${exitCode}`,
           runtime: Math.round(runtimeMs * 100) / 100,
-          memory: 0
+          memory: 0,
         });
         return;
       }
@@ -141,7 +166,7 @@ function runSingleTestCase(code, testCase, index) {
           passed: actual === expected,
           error: null,
           runtime: parsed.runtime || Math.round(runtimeMs * 100) / 100,
-          memory: parsed.memory || 0
+          memory: parsed.memory || 0,
         });
       } catch (parseErr) {
         resolve({
@@ -151,7 +176,7 @@ function runSingleTestCase(code, testCase, index) {
           passed: false,
           error: 'Could not parse output: ' + stdout.trim().slice(0, 200),
           runtime: Math.round(runtimeMs * 100) / 100,
-          memory: 0
+          memory: 0,
         });
       }
     });
@@ -166,182 +191,21 @@ function runSingleTestCase(code, testCase, index) {
         passed: false,
         error: 'Execution error: ' + err.message,
         runtime: 0,
-        memory: 0
+        memory: 0,
       });
     });
   });
 }
 
 /**
- * Wrap the user's code into a complete Python script that:
- * 1. Imports necessary modules safely
- * 2. Defines the user's solution
- * 3. Extracts the function name
- * 4. Parses test input from string format
- * 5. Calls the function and prints JSON result
+ * Pick a sensible file extension for the temp submission file based on the
+ * executor's docker image. The python harness reads JSON from stdout regardless
+ * of extension, but mounting a `.sql` file as `.sql` (not `.py`) keeps the
+ * runner scripts in Sections 3B/3C honest about what they receive.
  */
-function wrapCodeForExecution(code, inputStr) {
-  // Extract the function name from the code
-  const funcMatch = code.match(/def\s+(\w+)\s*\(/);
-  const funcName = funcMatch ? funcMatch[1] : 'solution';
-
-  // Build parser for the input based on its format
-  const parsedInput = buildInputParser(inputStr);
-
-  return `
-import json
-import sys
-import time
-import traceback
-
-# -- User's solution --
-${code}
-
-# -- Test harness --
-def _normalize(val):
-    """Convert values to a canonical string for comparison."""
-    if isinstance(val, bool):
-        return str(val).lower()
-    if isinstance(val, float):
-        return str(round(val, 6))
-    if isinstance(val, list):
-        return '[' + ', '.join(_normalize(v) for v in val) + ']'
-    if isinstance(val, str):
-        # If it looks like it should be a number or list,
-        # try to parse for comparison purposes
-        return str(val)
-    if isinstance(val, dict):
-        items = sorted((str(k), _normalize(v)) for k, v in val.items())
-        return '{' + ', '.join(f'{k}: {v}' for k, v in items) + '}'
-    return str(val)
-
-try:
-    start = time.time()
-    _input = ${parsedInput}
-
-    # Call the function with the parsed input
-    if isinstance(_input, tuple):
-        result = ${funcName}(*_input)
-    elif isinstance(_input, list):
-        result = ${funcName}(*_input)
-    else:
-        result = ${funcName}(_input)
-
-    end = time.time()
-    runtime = round((end - start) * 1000, 2)
-
-    print(json.dumps({
-        "result": result,
-        "runtime": runtime,
-        "memory": 0
-    }))
-except Exception as e:
-    traceback.print_exc(file=sys.stderr)
-    sys.exit(1)
-`.trim();
-}
-
-/**
- * Parse input strings like:
- *   "[2,7,11,15], 9" -> ( [2,7,11,15], 9 )
- *   '["h","e","l","l","o"]' -> ( ["h","e","l","l","o"] )
- *   '"abcabcbb"' -> ( "abcabcbb" )
- * Handles the LeetCode-style input format.
- */
-function buildInputParser(inputStr) {
-  if (!inputStr) return 'None';
-
-  // Check if it looks like multiple arguments separated by commas at top level
-  // We need to be careful with commas inside brackets
-  const parts = splitTopLevel(inputStr);
-
-  if (parts.length === 1) {
-    return tryParseValue(parts[0]);
-  }
-
-  const parsedParts = parts.map(tryParseValue);
-  return '[' + parsedParts.join(', ') + ']';
-}
-
-function splitTopLevel(str) {
-  const parts = [];
-  let current = '';
-  let depth = 0;
-  let inString = false;
-  let stringChar = '';
-
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-
-    if (inString) {
-      current += ch;
-      if (ch === stringChar && str[i - 1] !== '\\') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === '"' || ch === "'") {
-      inString = true;
-      stringChar = ch;
-      current += ch;
-      continue;
-    }
-
-    if (ch === '[' || ch === '{' || ch === '(') {
-      depth++;
-      current += ch;
-      continue;
-    }
-
-    if (ch === ']' || ch === '}' || ch === ')') {
-      depth--;
-      current += ch;
-      continue;
-    }
-
-    if (ch === ',' && depth === 0) {
-      parts.push(current.trim());
-      current = '';
-      continue;
-    }
-
-    current += ch;
-  }
-
-  if (current.trim()) {
-    parts.push(current.trim());
-  }
-
-  return parts;
-}
-
-function tryParseValue(val) {
-  const trimmed = val.trim();
-
-  // None/null
-  if (trimmed === 'None' || trimmed === 'null') return 'None';
-
-  // Boolean
-  if (trimmed === 'True' || trimmed === 'true') return 'True';
-  if (trimmed === 'False' || trimmed === 'false') return 'False';
-
-  // Number
-  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return trimmed;
-
-  // String (already quoted)
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed;
-  }
-
-  // List/array bracket notation - convert to Python list literal
-  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-    // Keep as-is, Python can parse this
-    return trimmed;
-  }
-
-  return trimmed;
+function pickExtension(image) {
+  if (image.startsWith('duckdb') || image.startsWith('dbt')) return '.sql';
+  return '.py';
 }
 
 /**
@@ -353,7 +217,6 @@ function normalizeResult(val) {
 
   let str;
   if (typeof val === 'string') {
-    // Try to parse as JSON first
     try {
       const parsed = JSON.parse(val);
       return normalizeResult(parsed);
@@ -377,13 +240,13 @@ function normalizeResult(val) {
     str = String(val);
   }
 
-  // Normalize spacing: remove all whitespace
   str = str.replace(/\s+/g, '');
-
-  // Normalize quotes
   str = str.replace(/'/g, '"');
 
   return str;
 }
 
-module.exports = { executeCode };
+module.exports = {
+  executeCode,
+  isValidExecutorType,
+};
