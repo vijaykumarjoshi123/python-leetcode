@@ -1,11 +1,35 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { problemsAPI } from '../services/api';
 import './Problems.css';
 
+// Tracks shown in the sidebar. "all" is a meta-value rendered first.
+const TRACKS = [
+  { id: 'all', label: 'All problems' },
+  { id: 'foundations', label: 'Foundations (Python, SQL)' },
+  { id: 'data-engineering', label: 'Data engineering (PySpark, dbt)' },
+  { id: 'orchestration', label: 'Orchestration (Airflow)' },
+  { id: 'streaming', label: 'Streaming (Kafka)' },
+  { id: 'lakehouse', label: 'Lakehouse (Iceberg, Delta)' },
+];
+
+// Pill colours per executorType. Sub-section 6A spec: "blue for Python,
+// green for SQL, orange for PySpark, teal for dbt, purple for Airflow, red
+// for Kafka, amber for Iceberg."
+const EXECUTOR_PILL_COLORS = {
+  python: '#3b82f6',
+  sql: '#22c55e',
+  pyspark: '#f97316',
+  dbt: '#14b8a6',
+  airflow: '#a855f7',
+  kafka: '#ef4444',
+  iceberg: '#f59e0b',
+};
+
 function Problems() {
   const [problems, setProblems] = useState([]);
   const [filters, setFilters] = useState({ difficulty: '', category: '', search: '' });
+  const [activeTrack, setActiveTrack] = useState('all');
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -14,10 +38,12 @@ function Problems() {
   const fetchProblems = useCallback(async () => {
     try {
       setLoading(true);
-      const params = { ...filters, page, limit: 20 };
+      const params = { ...filters, page, limit: 100 };
       Object.keys(params).forEach(key => {
         if (!params[key]) delete params[key];
       });
+      // Fetch a large page so the track sidebar can show counts derived
+      // from the full set rather than just the current page.
       const response = await problemsAPI.getAll(params);
       setProblems(response.data.problems);
       setTotalPages(response.data.pages || 1);
@@ -67,125 +93,187 @@ function Problems() {
     return false;
   };
 
+  // Counts per track, computed from the full fetched set. Memoised so we
+  // don't recompute on every render.
+  const trackCounts = useMemo(() => {
+    const counts = { all: problems.length };
+    for (const t of TRACKS) {
+      if (t.id !== 'all') counts[t.id] = 0;
+    }
+    for (const p of problems) {
+      const t = p.track || 'foundations';
+      if (counts[t] !== undefined) counts[t] += 1;
+    }
+    return counts;
+  }, [problems]);
+
+  // Track filter is applied client-side; the existing server filters
+  // (difficulty, category, search) still apply.
+  const visibleProblems = useMemo(() => {
+    if (activeTrack === 'all') return problems;
+    return problems.filter(p => (p.track || 'foundations') === activeTrack);
+  }, [problems, activeTrack]);
+
   return (
     <div className="problems-page">
       <div className="problems-container">
         <div className="problems-header">
           <h1>Problems</h1>
-          <p className="problems-subtitle">Practice Python with {problems.length}+ curated challenges</p>
+          <p className="problems-subtitle">
+            Practice data engineering with {problems.length}+ curated challenges across Python, SQL, Spark, dbt, Airflow, Kafka, and Iceberg.
+          </p>
         </div>
 
-        <div className="filters">
-          <div className="filter-group">
-            <label>Difficulty</label>
-            <select
-              name="difficulty"
-              value={filters.difficulty}
-              onChange={handleFilterChange}
-            >
-              <option value="">All Difficulties</option>
-              <option value="Easy">Easy</option>
-              <option value="Medium">Medium</option>
-              <option value="Hard">Hard</option>
-            </select>
-          </div>
-
-          <div className="filter-group">
-            <label>Category</label>
-            <select
-              name="category"
-              value={filters.category}
-              onChange={handleFilterChange}
-            >
-              <option value="">All Categories</option>
-              {categories.map(cat => (
-                <option key={cat} value={cat}>{cat}</option>
+        <div className="problems-layout">
+          {/* Left sidebar: track filter (sub-section 6A) */}
+          <aside className="track-sidebar">
+            <h3 className="track-sidebar-title">Tracks</h3>
+            <ul className="track-list">
+              {TRACKS.map(track => (
+                <li key={track.id}>
+                  <button
+                    type="button"
+                    className={`track-button ${activeTrack === track.id ? 'active' : ''}`}
+                    onClick={() => setActiveTrack(track.id)}
+                  >
+                    <span className="track-label">{track.label}</span>
+                    <span className="track-count">{trackCounts[track.id] ?? 0}</span>
+                  </button>
+                </li>
               ))}
-            </select>
-          </div>
+            </ul>
+          </aside>
 
-          <div className="filter-group">
-            <label>Search</label>
-            <input
-              type="text"
-              name="search"
-              value={filters.search}
-              onChange={handleFilterChange}
-              placeholder="Search by title or description..."
-            />
+          {/* Main: filters + table */}
+          <div className="problems-main">
+            <div className="filters">
+              <div className="filter-group">
+                <label>Difficulty</label>
+                <select
+                  name="difficulty"
+                  value={filters.difficulty}
+                  onChange={handleFilterChange}
+                >
+                  <option value="">All Difficulties</option>
+                  <option value="Easy">Easy</option>
+                  <option value="Medium">Medium</option>
+                  <option value="Hard">Hard</option>
+                </select>
+              </div>
+
+              <div className="filter-group">
+                <label>Category</label>
+                <select
+                  name="category"
+                  value={filters.category}
+                  onChange={handleFilterChange}
+                >
+                  <option value="">All Categories</option>
+                  {categories.map(cat => (
+                    <option key={cat} value={cat}>{cat}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="filter-group">
+                <label>Search</label>
+                <input
+                  type="text"
+                  name="search"
+                  value={filters.search}
+                  onChange={handleFilterChange}
+                  placeholder="Search by title or description..."
+                />
+              </div>
+            </div>
+
+            {loading ? (
+              <div className="loading">Loading problems...</div>
+            ) : visibleProblems.length === 0 ? (
+              <div className="no-results">
+                <p>No problems found matching your filters.</p>
+                <button onClick={() => {
+                  setFilters({ difficulty: '', category: '', search: '' });
+                  setActiveTrack('all');
+                  setPage(1);
+                }}>
+                  Clear Filters
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="problems-list">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th className="col-status">Status</th>
+                        <th className="col-title">Title</th>
+                        <th className="col-difficulty">Difficulty</th>
+                        <th className="col-executor">Tool</th>
+                        <th className="col-category">Category</th>
+                        <th className="col-acceptance">Acceptance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleProblems.map(problem => (
+                        <tr key={problem._id}>
+                          <td>
+                            <div className={`status-icon ${isSolved(problem._id) ? 'solved' : ''}`}>
+                              {isSolved(problem._id) ? '✓' : ''}
+                            </div>
+                          </td>
+                          <td>
+                            <Link to={`/problem/${problem._id}`} className="problem-link">
+                              {problem.title}
+                            </Link>
+                          </td>
+                          <td>
+                            <span
+                              className="difficulty-badge"
+                              style={{ color: getDifficultyColor(problem.difficulty) }}
+                            >
+                              {problem.difficulty}
+                            </span>
+                          </td>
+                          <td className="executor-cell">
+                            {problem.executorType && (
+                              <span
+                                className="executor-pill"
+                                style={{ background: EXECUTOR_PILL_COLORS[problem.executorType] || '#666' }}
+                              >
+                                {problem.executorType}
+                              </span>
+                            )}
+                          </td>
+                          <td className="category-cell">{problem.category}</td>
+                          <td>{problem.acceptanceRate}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="pagination">
+                  <button
+                    onClick={() => setPage(Math.max(1, page - 1))}
+                    disabled={page === 1}
+                    className="pagination-btn"
+                  >
+                    Previous
+                  </button>
+                  <span className="page-info">Page {page} of {totalPages}</span>
+                  <button
+                    onClick={() => setPage(page + 1)}
+                    disabled={page >= totalPages}
+                    className="pagination-btn"
+                  >
+                    Next
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
-
-        {loading ? (
-          <div className="loading">Loading problems...</div>
-        ) : problems.length === 0 ? (
-          <div className="no-results">
-            <p>No problems found matching your filters.</p>
-            <button onClick={() => { setFilters({ difficulty: '', category: '', search: '' }); setPage(1); }}>
-              Clear Filters
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="problems-list">
-              <table>
-                <thead>
-                  <tr>
-                    <th className="col-status">Status</th>
-                    <th className="col-title">Title</th>
-                    <th className="col-difficulty">Difficulty</th>
-                    <th className="col-category">Category</th>
-                    <th className="col-acceptance">Acceptance</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {problems.map(problem => (
-                    <tr key={problem._id}>
-                      <td>
-                        <div className={`status-icon ${isSolved(problem._id) ? 'solved' : ''}`}>
-                          {isSolved(problem._id) ? '✓' : ''}
-                        </div>
-                      </td>
-                      <td>
-                        <Link to={`/problem/${problem._id}`} className="problem-link">
-                          {problem.title}
-                        </Link>
-                      </td>
-                      <td>
-                        <span
-                          className="difficulty-badge"
-                          style={{ color: getDifficultyColor(problem.difficulty) }}
-                        >
-                          {problem.difficulty}
-                        </span>
-                      </td>
-                      <td className="category-cell">{problem.category}</td>
-                      <td>{problem.acceptanceRate}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="pagination">
-              <button
-                onClick={() => setPage(Math.max(1, page - 1))}
-                disabled={page === 1}
-                className="pagination-btn"
-              >
-                Previous
-              </button>
-              <span className="page-info">Page {page} of {totalPages}</span>
-              <button
-                onClick={() => setPage(page + 1)}
-                disabled={page >= totalPages}
-                className="pagination-btn"
-              >
-                Next
-              </button>
-            </div>
-          </>
-        )}
       </div>
     </div>
   );

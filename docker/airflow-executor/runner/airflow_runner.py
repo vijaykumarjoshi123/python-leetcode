@@ -100,6 +100,25 @@ def validate_structure(dag) -> list[str]:
         if not has_groups:
             issues.append("dynamic task generation detected without a TaskGroup — consider grouping related tasks")
 
+    # Anti-pattern: PythonOperator(..., provide_context=True). Airflow 1.x
+    # used this to opt into receiving the context dict; Airflow 2.x always
+    # passes context, so the kwarg is dead. We can't introspect the user's
+    # source from a constructed DAG, so detect via the OP_KWARGS trail: when
+    # `provide_context` was passed, Airflow 2.x's PythonOperator.__init__
+    # silently accepted it and stored it in op_kwargs (with a warning logged
+    # to stderr that the sandbox user may have suppressed). Inspect each
+    # PythonOperator's op_kwargs for the residual key.
+    from airflow.operators.python import PythonOperator
+    stale_kwarg_tasks = [
+        t.task_id for t in dag.tasks
+        if isinstance(t, PythonOperator) and 'provide_context' in (t.op_kwargs or {})
+    ]
+    if stale_kwarg_tasks:
+        issues.append(
+            f"PythonOperator(s) still use the Airflow 1.x `provide_context=True` kwarg "
+            f"(now a no-op in 2.x): {stale_kwarg_tasks}"
+        )
+
     return issues
 
 
@@ -108,24 +127,73 @@ def run_python_tasks(dag) -> list[str]:
 
     Returns a list of error messages (empty list == all passed).
     Only attempts tasks whose op_type is 'PythonOperator'.
+
+    The mock `ti` is an in-memory stand-in that supports the small subset
+    of the real TaskInstance API that user DAGs use in task-level isolation
+    testing: `xcom_push(key, value)` / `xcom_pull(key)` / `xcom_pull(task_ids,
+    key)`. We don't run a real Airflow scheduler — pull returns whatever
+    was pushed earlier in this run, with task_id defaults to the current
+    task when not specified.
     """
+
+    class MockTaskInstance:
+        """Minimal TI that supports the XCom calls a user DAG might make."""
+
+        def __init__(self, task_id: str, store: dict):
+            self.task_id = task_id
+            self._store = store
+
+        def xcom_push(self, key: str, value):
+            self._store[(self.task_id, key)] = value
+            return value
+
+        def xcom_pull(self, task_ids=None, key: str = "return_value", include_prior_dates: bool = False):
+            # task_ids can be a str (single) or list; default to current task.
+            if task_ids is None or task_ids == self.task_id:
+                task_ids = [self.task_id]
+            elif isinstance(task_ids, str):
+                task_ids = [task_ids]
+            for tid in task_ids:
+                if (tid, key) in self._store:
+                    return self._store[(tid, key)]
+            return None
+
     from airflow.operators.python import PythonOperator
 
     errors: list[str] = []
-    mock_context = {
-        "ti": None,
-        "ts": "2024-01-01T00:00:00+00:00",
-        "dag": dag,
-        "task_instance": None,
-        "run_id": "manual__2024-01-01T00:00:00+00:00",
-        "execution_date": None,
-        "params": {},
-    }
+    xcom_store: dict = {}
+
+    # Pre-seed ts and other context fields. execution_date is mocked because
+    # we don't have a real scheduler assigning one.
+    execution_date = "2024-01-01T00:00:00+00:00"
+
     for task in dag.tasks:
         if not isinstance(task, PythonOperator):
             continue
+        mock_ti = MockTaskInstance(task.task_id, xcom_store)
+        mock_context = {
+            "ti": mock_ti,
+            "ts": execution_date,
+            "dag": dag,
+            "task_instance": mock_ti,
+            "run_id": f"manual__{execution_date}",
+            "execution_date": execution_date,
+            "params": {},
+        }
         try:
-            task.python_callable(*task.op_args, **task.op_kwargs)
+            task.python_callable(*task.op_args, **task.op_kwargs, **mock_context)
+        except TypeError as e:
+            # Airflow 1.x-style callables that take no kwargs (no **context)
+            # will fail here. Retry without the mock context — the bug list
+            # explicitly calls out the `provide_context=True` antipattern,
+            # and a corrected DAG should not exhibit it.
+            if "missing" in str(e) or "unexpected keyword" in str(e):
+                try:
+                    task.python_callable(*task.op_args, **task.op_kwargs)
+                except Exception as e2:
+                    errors.append(f"task {task.task_id!r}: {type(e2).__name__}: {e2}")
+            else:
+                errors.append(f"task {task.task_id!r}: {type(e).__name__}: {e}")
         except Exception as e:
             errors.append(f"task {task.task_id!r}: {type(e).__name__}: {e}")
     return errors

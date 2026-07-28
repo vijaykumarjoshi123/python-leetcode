@@ -5,7 +5,7 @@
 }
 
 .problems-container {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
 }
 
@@ -13,6 +13,118 @@
   margin-bottom: 30px;
   color: #333;
   font-size: 2.5rem;
+}
+
+/* Sidebar + main layout for the track filter (Section 6A). */
+.problems-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.track-sidebar {
+  background: white;
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  position: sticky;
+  top: 80px;
+}
+
+.track-sidebar-title {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #666;
+}
+
+.track-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.track-list li {
+  margin-bottom: 4px;
+}
+
+.track-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.9rem;
+  color: #444;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.track-button:hover {
+  background: #f5f7fa;
+  border-color: #e6ebf1;
+}
+
+.track-button.active {
+  background: #eef2ff;
+  border-color: #667eea;
+  color: #4338ca;
+  font-weight: 600;
+}
+
+.track-count {
+  display: inline-block;
+  min-width: 24px;
+  padding: 2px 8px;
+  background: #f0f1f5;
+  color: #555;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.track-button.active .track-count {
+  background: #667eea;
+  color: white;
+}
+
+.problems-main {
+  min-width: 0;
+}
+
+/* ExecutorType pill in the problem table. */
+.executor-cell {
+  padding: 6px 0;
+}
+
+.executor-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  color: white;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+}
+
+@media (max-width: 768px) {
+  .problems-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .track-sidebar {
+    position: static;
+  }
 }
 
 .filters {

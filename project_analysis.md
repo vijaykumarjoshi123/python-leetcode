@@ -223,9 +223,19 @@ See [Architecture.png](Architecture.png) for the canonical reference. (Pushed to
 
 > Sections 1B–4 are written to disk but **not yet committed/pushed** at the time this section was last edited. Run `git status` to confirm. They form one logical commit ("Sections 1–4: executor routing + schema + Docker images + compose").
 
+### Completed Locally (Not Yet Pushed)
+
+- **Section 5** — [backend/seeds/problems.js](backend/seeds/problems.js). Seven problems, one per executorType. Each carries `title`, markdown `description`, `difficulty`, `executorType`, `track`, `starterCode` (Map keyed by executorType), `evaluationScript`, visible `testCases` (1-2), and `hiddenTestCases` (2-5).
+  - Coverage: all 7 executorTypes × all 5 tracks. 17 hiddenTestCases total.
+  - Problems: Flatten nested JSON (python/foundations), Cohort retention query (sql/foundations), Skewed join optimisation (pyspark/data-engineering), Incremental model with late-arriving data (dbt/data-engineering), Debug this broken DAG (airflow/orchestration), Exactly-once event deduplication (kafka/streaming), Schema evolution with partition pruning (iceberg/lakehouse).
+
+### Schema Deltas Made Outside Sections 2 / 5
+
+- `Problem.hiddenTestCases[]` — added in Section 5 to match the spec's "hiddenTestCases (at least 2)" requirement. Distinct from `testCases[]` (which has `visible: true` by default).
+- [airflow_runner.py](docker/airflow-executor/runner/airflow_runner.py) — extended with `MockTaskInstance` so XCom `push`/`pull` works in the sandbox, plus a static check for the stale `provide_context=True` kwarg. Required for Problem 5 to grade correctly.
+
 ### Not Started
 
-- **Section 5** — [backend/seeds/problems.js](backend/seeds/problems.js). One problem per executorType (7 total: python/sql/pyspark/dbt/airflow/kafka/iceberg). Each needs `title`, `description` (markdown), `difficulty`, `executorType`, `track`, `starterCode`, `hiddenTestCases`, `evaluationScript`.
 - **Section 6** — Frontend: track filter sidebar in ProblemList; ProblemSolve loads `starterCode[executorType]` and sets Monaco language; Profile adds the **Skills Radar** via recharts and a Certificates section; create [AIHintPanel.jsx](frontend/src/components/AIHintPanel.jsx) as a collapsible right-side panel with markdown rendering and an SSE-streamed response.
 - **Section 7** — [backend/routes/hints.js](backend/routes/hints.js): `POST /api/hints`, Anthropic SDK with executor-aware system prompt, SSE, 5 hints/user/problem/day via Redis TTL.
 - **Section 8** — Company assessment dashboard. New [backend/models/Assessment.js](backend/models/Assessment.js), [backend/routes/assessments.js](backend/routes/assessments.js), [frontend/src/pages/AssessmentDashboard.jsx](frontend/src/pages/AssessmentDashboard.jsx), [frontend/src/pages/CandidateReport.jsx](frontend/src/pages/CandidateReport.jsx). Candidate invite via single-use tokens.
@@ -234,10 +244,10 @@ See [Architecture.png](Architecture.png) for the canonical reference. (Pushed to
 
 ### Resumption Point
 
-Resume at **Section 5**. Memory has been updated to reflect this (`project-master-plan.md`, `resumption-point.md` under `~/.claude/projects/-Users-Vijay-python-leetcode/memory/`).
+Resume at **Section 6** (frontend). Memory has been updated to reflect this (`project-master-plan.md`, `resumption-point.md` under `~/.claude/projects/-Users-Vijay-python-leetcode/memory/`). The uncommitted Section 5 work — including the `hiddenTestCases` schema delta and the airflow runner extension — should be committed alongside Sections 1–4 if doing a clean rebase, or as a follow-up commit ("Section 5: seed problems + airflow runner XCom support").
 
 ---
 
 ## 8. Conclusion
 
-The platform has pivoted from a Python LeetCode clone into a real-tool data engineering assessment platform. Sections 1–4 land the execution-engine substrate (router, schema, Docker images, compose). Sections 5–10 deliver the user-facing product (problems, frontend tracks, hints, company dashboard, concurrency guard). The execution side is structurally complete; what's left is content (problems) and product surface (UI, assessments, hints).
+The platform has pivoted from a Python LeetCode clone into a real-tool data engineering assessment platform. Sections 1–5 land the execution substrate AND the content: the router, the schema, the Docker images, the compose, and seven seed problems covering all seven executor types across all five tracks. Sections 6–10 deliver the user-facing product (frontend tracks, hints, company dashboard, concurrency guard). What remains is product surface, not infrastructure — the assessment engine is end-to-end testable today.
