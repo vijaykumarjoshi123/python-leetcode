@@ -28,6 +28,11 @@ const forumRoutes = require('./routes/forum');
 const tutorRoutes = require('./routes/tutor');
 const hintRoutes = require('./routes/hints');
 const assessmentRoutes = require('./routes/assessments');
+// Tier 3 / Section 11D — pipeline simulator routes. Sibling of the
+// submission route; this one handles multi-stage pipeline attempts
+// (Kafka → Spark → Iceberg → dbt and similar). The single-tool
+// submission flow at /api/submissions is unchanged.
+const pipelineRoutes = require('./routes/pipelines');
 
 // Initialize Submission Queue Worker
 require('./services/submissionQueue');
@@ -40,6 +45,7 @@ app.use('/api/forum', forumRoutes);
 app.use('/api/tutor', tutorRoutes);
 app.use('/api/hints', hintRoutes);
 app.use('/api/assessments', assessmentRoutes);
+app.use('/api/pipelines', pipelineRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
