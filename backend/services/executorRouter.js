@@ -71,6 +71,26 @@ const EXECUTOR_CONFIG = {
     toolVersion: 'PyIceberg 0.7 / DuckDB (Databricks-Iceberg)',
     useGpu: false,
   },
+
+  // Tier 3 / Section 11B: the pipeline orchestrator itself. Note that
+  // this is the executorType for the *orchestrator* container (built in
+  // Section 11C). Individual pipeline stages use one of the 7 single-tool
+  // types above; this entry exists so the orchestrator can be spawned
+  // via the existing docker-run path with per-stage resource controls.
+  //
+  // Pipeline submissions are rejected at the HTTP layer by routes/
+  // submissions.js — callers must use /api/pipelines/run instead, which
+  // gives the orchestrator the pipelineSpec JSON instead of user code.
+  pipeline: {
+    image: 'pipeline-runner',
+    // The runner receives a JSON spec describing the stages at $1 and
+    // emits one consolidated result line to stdout (see Section 11C).
+    buildCmd: (file) => ['bash', '/runner/pipeline_runner.sh', file],
+    timeout: 300000,    // 5 min — pipelines can be long (Spark startup, Kafka KRaft boot, etc.)
+    memoryMb: 2048,     // orchestrator + fixtures in memory; bump via Docker socket if you go bigger
+    toolVersion: 'Multi-tool pipeline (Kafka → Spark → Iceberg → dbt)',
+    useGpu: false,
+  },
 };
 
 const DEFAULT_EXECUTOR = 'python';

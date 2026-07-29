@@ -168,3 +168,12 @@ services:
     image: iceberg-executor:latest
     profiles: ["build"]
     restart: "no"
+
+  # Tier 3 / Section 11C: pipeline orchestrator. Same role as in the dev
+  # compose — built but not started; spawned on demand by the backend
+  # worker when a pipeline run needs final-stage comparison.
+  pipeline-runner:
+    build: ./docker/pipeline-runner
+    image: pipeline-runner:latest
+    profiles: ["build"]
+    restart: "no"

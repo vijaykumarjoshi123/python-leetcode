@@ -78,5 +78,15 @@ services:
     image: iceberg-executor:latest
     profiles: ["build"]
 
+  # Tier 3 / Section 11C: pipeline orchestrator. NOT a stage executor —
+  # stages use one of the 7 single-tool images above. This image is the
+  # final-comparison step: the backend spawns one stage container per
+  # stage, then spawns this container once with a spec describing where
+  # each stage's output lives and where the expected outputs are.
+  pipeline-runner:
+    build: ./docker/pipeline-runner
+    image: pipeline-runner:latest
+    profiles: ["build"]
+
 volumes:
   mongodb_data:

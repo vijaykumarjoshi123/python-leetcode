@@ -44,7 +44,11 @@ const userSchema = new mongoose.Schema({
     problemCount: { type: Number },
   }],
   solvedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problem' }],
-  attemptedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problem' }]
+  attemptedProblems: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Problem' }],
+  // Tier 3 / Section 11A: opt-in flag for the multi-tool pipeline simulator.
+  // Default false so existing users don't accidentally see the new feature.
+  // Spec Section 11A exit criterion: existing users validate unchanged.
+  pipelineEnabled: { type: Boolean, default: false },
 });
 
 module.exports = mongoose.model('User', userSchema);

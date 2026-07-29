@@ -31,6 +31,22 @@ router.post('/submit', async (req, res) => {
       });
     }
 
+    // Tier 3 / Section 11B guard: pipeline is a valid executor type per the
+    // router (because the orchestrator container uses it) but it is NOT a
+    // valid executor type for /api/submissions/submit. Pipeline runs are
+    // submitted via /api/pipelines/run (Section 11D) and carry a
+    // pipelineSpec, not raw user code. Returning a 400 here protects the
+    // existing submission grader from trying to grade a pipeline as a
+    // single-tool submission — which would produce nonsensical results
+    // because the orchestrator expects a spec file, not a .py / .sql.
+    if (resolvedExecutorType === 'pipeline') {
+      return res.status(400).json({
+        error:
+          "executorType 'pipeline' cannot be submitted via /api/submissions/submit. " +
+          'Use POST /api/pipelines/run for multi-tool pipeline problems.',
+      });
+    }
+
     // Get problem
     const problem = await Problem.findById(problemId);
     if (!problem) return res.status(404).json({ msg: 'Problem not found' });
