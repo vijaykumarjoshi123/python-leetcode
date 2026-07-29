@@ -1,0 +1,57 @@
+# Multi-stage production Dockerfile for the frontend (React SPA).
+#
+# Stage 1: build the static assets via `react-scripts build`.
+# Stage 2: serve the build/ output through nginx. nginx also acts as the
+#          reverse proxy for /api/* -> backend (so a single 443 port serves
+#          everything in production).
+#
+# Build:
+#   docker build -f frontend/Dockerfile.prod \
+#     --build-arg REACT_APP_API_URL=/api \
+#     -t platform-frontend:prod frontend/
+#
+# Run:
+#   docker run --rm -p 8080:80 \
+#     --network platform-net \
+#     platform-frontend:prod
+#
+# Note: REACT_APP_API_URL is baked into the JS bundle at build time. We use
+# the relative path "/api" so the same bundle works behind any reverse proxy
+# (nginx in our prod compose, or any CDN origin).
+
+# ---- Build stage ----
+FROM node:18-alpine AS build
+
+WORKDIR /app
+
+ARG REACT_APP_API_URL=/api
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
+
+# Install deps with cache-friendly layer ordering.
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+# react-scripts build outputs to build/.
+RUN npm run build
+
+# ---- Runtime stage (nginx) ----
+FROM nginx:1.27-alpine AS runtime
+
+# Drop the default nginx config; ship ours.
+RUN rm /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/conf.d/app.conf
+
+# Static assets.
+COPY --from=build /app/build /usr/share/nginx/html
+
+# Run as the unprivileged nginx user (already exists in the base image).
+USER nginx
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://localhost/ || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

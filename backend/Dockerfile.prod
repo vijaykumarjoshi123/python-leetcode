@@ -1,0 +1,68 @@
+# Multi-stage production Dockerfile for the backend service.
+#
+# Why multi-stage: the build stage installs `devDependencies` (so the
+# final image doesn't ship them). The runtime stage copies only
+# production node_modules.
+#
+# Why distroless-ish: we use node:18-alpine as the base because we need
+# `npm` and `bcrypt`/`sharp` are happier on glibc-like environments. We
+# still drop to a non-root user.
+#
+# Build:
+#   docker build -f backend/Dockerfile.prod -t platform-backend:prod backend/
+#
+# Run:
+#   docker run --rm -p 5000:5000 \
+#     --env-file backend/.env \
+#     --network platform-net \
+#     platform-backend:prod
+
+# ---- Build stage ----
+FROM node:18-alpine AS build
+
+WORKDIR /app
+
+# Install ALL deps (including dev) for the build/test step.
+COPY package*.json ./
+RUN npm ci
+
+# Bundle the source. `.dockerignore` excludes node_modules and .env.
+COPY . .
+
+# If you have a build step (TypeScript, babel), run it here. The current
+# backend is plain JS, so nothing to do.
+# RUN npm run build
+
+# Prune dev deps so the runtime image is lean.
+RUN npm prune --omit=dev
+
+# ---- Runtime stage ----
+FROM node:18-alpine AS runtime
+
+# Install tini for proper signal handling (so docker stop propagates SIGTERM
+# to the node process, not PID 1).
+RUN apk add --no-cache tini curl
+
+WORKDIR /app
+
+# Copy production deps + source from the build stage.
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app ./
+
+# Run as non-root. node:18-alpine ships with a `node` user (uid 1000).
+USER node
+
+ENV NODE_ENV=production \
+    PORT=5000
+
+EXPOSE 5000
+
+# Healthcheck — hits /api/health which the server already exposes. If you
+# change the path in server.js, update here too.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://localhost:5000/api/health || exit 1
+
+# tini reaps zombies and forwards signals. node process is the CMD.
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "server.js"]

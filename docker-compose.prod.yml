@@ -1,0 +1,170 @@
+# Production compose override.
+#
+# Used as:
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.build.yml up -d
+#
+# What this changes vs the dev compose:
+#   - Uses production Dockerfiles (Dockerfile.prod) for backend + frontend.
+#   - Frontend serves via nginx and proxies /api/* -> backend.
+#   - No source code bind mounts.
+#   - env_file reads /etc/platform/*.env so secrets stay out of the
+#     compose file.
+#   - Healthchecks everywhere.
+#   - restart: unless-stopped on long-running services.
+#   - The executor services stay in `profiles: [build]` — they're built
+#     but not started; the backend worker spawns them on demand.
+#
+# Required env files on the host (mount or symlink into /etc/platform/):
+#   backend.env     — MONGODB_URI, REDIS_URL, JWT_SECRET, ANTHROPIC_API_KEY, ...
+#   frontend.env    — (usually empty; REACT_APP_API_URL is baked at build time)
+#   smtp.env        — SMTP_HOST/PORT/USER/PASS/FROM
+#
+# Run once on a fresh host:
+#   1. cp backend/.env.example backend.env && edit secrets
+#   2. cp backend/.env.example smtp.env     && edit SMTP creds
+#   3. mkdir -p /etc/platform && mv *.env /etc/platform/
+#   4. docker network create platform-net
+#   5. docker-compose -f docker-compose.yml -f docker-compose.prod.yml \
+#        -f docker-compose.build.yml up -d
+#   6. docker-compose -f docker-compose.yml -f docker-compose.prod.yml exec backend \
+#        node seeds/problems.js   # seed initial problems (one-time)
+
+version: '3.8'
+
+# Production compose uses an explicit network so the reverse proxy
+# container can join it cleanly. Default compose network also works; this
+# just makes the topology explicit.
+networks:
+  platform-net:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+services:
+  mongodb:
+    image: mongo:6
+    restart: unless-stopped
+    # NO `ports:` — only the backend on the platform-net network reaches
+    # mongo. Expose 27017 directly on the host in dev only.
+    environment:
+      MONGO_INITDB_DATABASE: python-leetcode
+    volumes:
+      - mongodb_data:/data/db
+    networks: [platform-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Same — no host port.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks: [platform-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    # Internal-only — frontend (via nginx) hits this. Direct host port is
+    # for debug access only.
+    ports:
+      - "127.0.0.1:5000:5000"
+    env_file:
+      - /etc/platform/backend.env
+    environment:
+      NODE_ENV: production
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [platform-net]
+    # The backend worker spawns Docker containers on the host. Mounting
+    # /var/run/docker.sock is the standard (and security-significant)
+    # pattern. Don't expose this on a multi-tenant host without sandboxing.
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Empty by default; set this at build time if your prod reverse
+        # proxy terminates TLS on a different origin than the backend.
+        REACT_APP_API_URL: ${REACT_APP_API_URL:-/api}
+    restart: unless-stopped
+    # Single host port for everything in production. nginx inside the
+    # container serves the SPA and reverse-proxies /api/*.
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [platform-net]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Executor images. Built but not started — the backend spawns them
+  # on demand via `docker run`. Listed here so `up` builds them as part
+  # of the deployment pipeline.
+  duckdb-executor:
+    build: ./docker/duckdb-executor
+    image: duckdb-executor:latest
+    profiles: ["build"]
+    restart: "no"
+
+  pyspark-executor:
+    build: ./docker/pyspark-executor
+    image: pyspark-executor:latest
+    profiles: ["build"]
+    restart: "no"
+
+  dbt-executor:
+    build: ./docker/dbt-executor
+    image: dbt-executor:latest
+    profiles: ["build"]
+    restart: "no"
+
+  airflow-executor:
+    build: ./docker/airflow-executor
+    image: airflow-executor:latest
+    profiles: ["build"]
+    restart: "no"
+
+  kafka-executor:
+    build: ./docker/kafka-executor
+    image: kafka-executor:latest
+    profiles: ["build"]
+    restart: "no"
+
+  iceberg-executor:
+    build: ./docker/iceberg-executor
+    image: iceberg-executor:latest
+    profiles: ["build"]
+    restart: "no"
