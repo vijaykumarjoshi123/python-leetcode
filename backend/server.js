@@ -26,6 +26,8 @@ const submissionRoutes = require('./routes/submissions');
 const leaderboardRoutes = require('./routes/leaderboard');
 const forumRoutes = require('./routes/forum');
 const tutorRoutes = require('./routes/tutor');
+const hintRoutes = require('./routes/hints');
+const assessmentRoutes = require('./routes/assessments');
 
 // Initialize Submission Queue Worker
 require('./services/submissionQueue');
@@ -36,6 +38,8 @@ app.use('/api/submissions', submissionRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/forum', forumRoutes);
 app.use('/api/tutor', tutorRoutes);
+app.use('/api/hints', hintRoutes);
+app.use('/api/assessments', assessmentRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

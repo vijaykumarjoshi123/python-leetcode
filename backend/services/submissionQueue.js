@@ -88,8 +88,15 @@ const worker = new Worker('submissions', async (job) => {
     await submission.save();
 
   } catch (err) {
-    submission.status = 'Runtime Error';
-    submission.error = err.message;
+    // Spec 10: distinguish queue-full failures from generic runtime
+    // errors so the UI can suggest a retry rather than treating it as a
+    // code-level failure.
+    if (err && err.status === 'Queue full') {
+      submission.status = 'Queue Full';
+    } else {
+      submission.status = 'Runtime Error';
+    }
+    submission.error = err.message || String(err);
     await submission.save();
   }
 }, { connection });

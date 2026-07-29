@@ -77,4 +77,17 @@ export const forumAPI = {
   likeComment: (commentId) => api.put(`/api/forum/comment/${commentId}/like`),
 };
 
+// ==================== Assessments API (Spec 8B) ====================
+// Company-facing. Wrappers stay thin — see backend/routes/assessments.js
+// for the wire protocol.
+export const assessmentsAPI = {
+  list: () => api.get('/api/assessments'),
+  create: (data) => api.post('/api/assessments', data),
+  detail: (id) => api.get(`/api/assessments/${id}`),
+  invite: (id, emails) => api.post(`/api/assessments/${id}/invite`, { emails }),
+  report: (id) => api.get(`/api/assessments/${id}/report`),
+  // Public route used by the candidate via the emailed link.
+  joinByToken: (token) => api.get(`/api/assessments/join/${token}`),
+};
+
 export default api;

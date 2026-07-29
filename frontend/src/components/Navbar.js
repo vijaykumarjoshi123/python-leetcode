@@ -40,6 +40,11 @@ function Navbar() {
             <div className="nav-user">
               <span className="user-name">{user?.username}</span>
               <Link to={`/profile/${user?.id}`} className="nav-link">Profile</Link>
+              {/* Spec 8C: only companies see the Assessments link. The
+                  dashboard itself also re-checks the role server-side. */}
+              {user?.accountType === 'company' && (
+                <Link to="/assessments" className="nav-link">Assessments</Link>
+              )}
               <button onClick={handleLogout} className="btn-logout">Logout</button>
             </div>
           ) : (

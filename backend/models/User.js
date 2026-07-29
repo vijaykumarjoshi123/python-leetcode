@@ -8,6 +8,17 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   avatar: { type: String, default: '' },
   bio: { type: String, default: '' },
+  // Distinguishes individual users from company accounts. Companies own
+  // assessments; individuals can be invited as candidates. Spec 8A: "company
+  // account type" — modelled as a string field with two values for now.
+  // A separate `Company` collection is overkill for the schema as described.
+  accountType: {
+    type: String,
+    enum: ['individual', 'company'],
+    default: 'individual',
+  },
+  // Company display name. Only meaningful when accountType === 'company'.
+  companyName: { type: String, default: '' },
   createdAt: { type: Date, default: Date.now },
   stats: {
     totalSolved: { type: Number, default: 0 },

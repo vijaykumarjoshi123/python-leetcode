@@ -6,9 +6,17 @@
 
 .solver-container {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr auto;
   width: 100%;
   gap: 0;
+  align-items: start;
+}
+
+.hint-column {
+  padding: 16px;
+  height: calc(100vh - 100px);
+  position: sticky;
+  top: 80px;
 }
 
 /* ---- Left Panel ---- */
@@ -516,6 +524,36 @@
   border-radius: 4px;
   font-weight: 600;
   font-size: 0.8rem;
+}
+
+/* Spec 6B: per-executor tag colours used in problem-meta and the
+   submissions list. Mirrors the executor-pill palette in Problems.css. */
+.executor-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  color: white;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+}
+.executor-python  { background: #3b82f6; }
+.executor-sql     { background: #22c55e; }
+.executor-pyspark { background: #f97316; }
+.executor-dbt     { background: #14b8a6; }
+.executor-airflow { background: #a855f7; }
+.executor-kafka   { background: #ef4444; }
+.executor-iceberg { background: #f59e0b; }
+
+.track-tag {
+  display: inline-block;
+  padding: 3px 10px;
+  background: #f0f1f5;
+  color: #555;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
 }
 
 .editor-actions {

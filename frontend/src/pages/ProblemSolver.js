@@ -2,12 +2,37 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import { problemsAPI, submissionsAPI, forumAPI } from '../services/api';
+import AIHintPanel from '../components/AIHintPanel';
 import './ProblemSolver.css';
 
 const DEFAULT_CODE = `# Write your solution here
 def solution():
     pass
 `;
+
+// Per-executor Monaco language. Spec 6B: `python` → `python`; `sql`, `dbt`
+// → `sql`; everything else (pyspark, airflow, kafka, iceberg) → `python`.
+const EXECUTOR_LANGUAGE = {
+  python: 'python',
+  sql: 'sql',
+  dbt: 'sql',
+  pyspark: 'python',
+  airflow: 'python',
+  kafka: 'python',
+  iceberg: 'python',
+};
+
+// Human-readable toolVersion per executor for the "Running on" badge.
+// Mirrors the toolVersion strings in backend/services/executorRouter.js.
+const EXECUTOR_TOOL_VERSION = {
+  python: 'Python 3.11',
+  sql: 'DuckDB 0.10 (Snowflake-compatible SQL)',
+  pyspark: 'PySpark 3.5',
+  dbt: 'dbt-core 1.7 (DuckDB adapter)',
+  airflow: 'Apache Airflow 2.9',
+  kafka: 'Kafka 3.7 (KRaft mode)',
+  iceberg: 'PyIceberg 0.7 / DuckDB (Databricks-Iceberg)',
+};
 
 function ProblemSolver() {
   const { id } = useParams();
@@ -36,10 +61,21 @@ function ProblemSolver() {
     try {
       setLoading(true);
       const response = await problemsAPI.getById(id);
-      setProblem(response.data);
-      // Set starter code with the problem's function signature if available
-      if (response.data.solution?.code) {
-        setCode(response.data.solution.code + '\n\n# Write your test and submit');
+      const p = response.data;
+      setProblem(p);
+
+      // Spec 6B: fetch the executorType-specific starterCode, not the
+      // generic solution.code (which is the model answer). Fall back to
+      // DEFAULT_CODE if neither is present so the editor is never blank.
+      const executorType = p.executorType || 'python';
+      const starterCodeMap = p.starterCode || {};
+      const perTypeStarter = starterCodeMap[executorType];
+      if (typeof perTypeStarter === 'string' && perTypeStarter.length > 0) {
+        setCode(perTypeStarter);
+      } else if (p.solution?.code) {
+        setCode(p.solution.code + '\n\n# Write your test and submit');
+      } else {
+        setCode(DEFAULT_CODE);
       }
     } catch (err) {
       console.error('Error fetching problem:', err);
@@ -95,11 +131,15 @@ function ProblemSolver() {
     try {
       setSubmitting(true);
       setOutput(null);
+      // Spec 6B: include executorType so the router picks the right image
+      // (python/sql/pyspark/dbt/airflow/kafka/iceberg). Falls back to
+      // 'python' for legacy problems that don't have the field.
       const response = await submissionsAPI.submit({
         userId: user.id,
         problemId: id,
         code,
-        language: 'python'
+        language: 'python',
+        executorType: problem?.executorType || 'python',
       });
 
       const submission = response.data;
@@ -221,6 +261,14 @@ function ProblemSolver() {
                   <span className={`difficulty difficulty-${problem?.difficulty?.toLowerCase()}`}>
                     {problem?.difficulty}
                   </span>
+                  {problem?.executorType && (
+                    <span className={`executor-tag executor-${problem.executorType}`}>
+                      {problem.executorType}
+                    </span>
+                  )}
+                  {problem?.track && (
+                    <span className="track-tag">{problem.track}</span>
+                  )}
                   <span className="category">{problem?.category}</span>
                   <span className="acceptance">{problem?.acceptanceRate}% Acceptance</span>
                   <span className="submission-count">{problem?.submissions} submissions</span>
@@ -314,7 +362,16 @@ function ProblemSolver() {
                         <div className="submission-details">
                           <span>Tests: {sub.testCasesPassed}/{sub.totalTestCases}</span>
                           {sub.runtime != null && <span>Runtime: {sub.runtime} ms</span>}
+                          {sub.executionRuntime != null && (
+                            <span>Wall-clock: {sub.executionRuntime} ms</span>
+                          )}
                           <span>Language: {sub.language}</span>
+                          {sub.executorType && (
+                            <span className={`executor-tag executor-${sub.executorType}`}>
+                              {sub.executorType}
+                            </span>
+                          )}
+                          {sub.toolVersion && <span>on {sub.toolVersion}</span>}
                         </div>
                         {sub.error && (
                           <div className="submission-error">
@@ -457,11 +514,20 @@ function ProblemSolver() {
         {/* Right Panel: Code Editor */}
         <div className="editor-panel">
           <div className="editor-header">
-            <span className="language-badge">Python 3</span>
+            <span className="language-badge">
+              {/* Spec 6B: "Running on: PySpark 3.5 · DuckDB 0.10" badge */}
+              Running on: {EXECUTOR_TOOL_VERSION[problem?.executorType || 'python'] || 'Python 3.11'}
+            </span>
             <div className="editor-actions">
               <button
                 className="btn-reset"
-                onClick={() => setCode(problem?.solution?.code || DEFAULT_CODE)}
+                onClick={() => {
+                  // Reset back to the per-executor starterCode (the model
+                  // answer isn't what we want here — spec says the editor
+                  // pre-fills with the boilerplate for that tool).
+                  const starter = problem?.starterCode?.[problem?.executorType || 'python'];
+                  setCode(typeof starter === 'string' && starter.length > 0 ? starter : DEFAULT_CODE);
+                }}
               >
                 Reset
               </button>
@@ -471,7 +537,7 @@ function ProblemSolver() {
           <div className="monaco-wrapper">
             <Editor
               height="100%"
-              defaultLanguage="python"
+              language={EXECUTOR_LANGUAGE[problem?.executorType || 'python'] || 'python'}
               theme="vs-dark"
               value={code}
               onChange={(value) => setCode(value || '')}
@@ -574,6 +640,22 @@ function ProblemSolver() {
               )}
             </div>
           </div>
+        </div>
+
+        {/* Right of the editor: AI hint panel (Spec 6D). Wraps with the
+            editor-panel in a flex container so the hint panel collapses
+            without disturbing the editor's layout. */}
+        <div className="hint-column">
+          <AIHintPanel
+            problemId={id}
+            code={code}
+            executorType={problem?.executorType}
+            submissionHistory={submissions}
+            isExecuting={submitting}
+            // Assessments aren't wired yet (Section 8); the prop defaults
+            // to false so hints are usable everywhere for now.
+            isTimedAssessment={false}
+          />
         </div>
       </div>
     </div>

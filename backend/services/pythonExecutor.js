@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { getExecutorConfig, isValidExecutorType } = require('./executorRouter');
+const { runWithGuard } = require('./concurrencyGuard');
 
 /**
  * Execute user-submitted code against test cases inside the appropriate
@@ -25,13 +26,21 @@ async function executeCode(code, testCases, executorType = 'python') {
   const config = getExecutorConfig(executorType);
 
   const overallStart = process.hrtime.bigint();
-  const results = [];
 
-  for (let i = 0; i < testCases.length; i++) {
-    const testCase = testCases[i];
-    const result = await runSingleTestCase(code, testCase, i, config);
-    results.push(result);
-  }
+  // Spec 10: cap concurrent docker spawns. The whole submission runs
+  // under one semaphore permit; release happens in runWithGuard's
+  // finally. If the queue is full we throw an Error with .status
+  // === 'Queue full' — submissionQueue.js catches it and records the
+  // submission with a distinct status.
+  const results = await runWithGuard(async () => {
+    const out = [];
+    for (let i = 0; i < testCases.length; i++) {
+      const testCase = testCases[i];
+      const result = await runSingleTestCase(code, testCase, i, config);
+      out.push(result);
+    }
+    return out;
+  });
 
   const overallEnd = process.hrtime.bigint();
   const executionRuntimeMs = Number(overallEnd - overallStart) / 1_000_000;

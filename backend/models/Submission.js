@@ -15,7 +15,7 @@ const submissionSchema = new mongoose.Schema({
   executionRuntime: { type: Number },  // wall-clock ms from Docker start to result
   status: {
     type: String,
-    enum: ['Accepted', 'Wrong Answer', 'Time Limit Exceeded', 'Runtime Error', 'Pending'],
+    enum: ['Accepted', 'Wrong Answer', 'Time Limit Exceeded', 'Runtime Error', 'Queue Full', 'Pending'],
     default: 'Pending'
   },
   runtime: { type: Number }, // in ms
