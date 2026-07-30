@@ -50,20 +50,10 @@ const { runWithGuard } = require('./concurrencyGuard');
 const { validatePipelineShape } = require('../models/PipelineProblem');
 
 // Section 11E — failure injection. The orchestrator looks up the
-// scenario by slug; in 11D (before scenarios exist) we accept null and
-// treat it as "no injection". Loaded lazily inside runPipeline() so the
-// orchestrator module still parses when PipelineScenario.js doesn't
-// exist yet (which is the state of the world up until 11E lands).
-let _PipelineScenario = null;
-function getScenarioModel() {
-  if (_PipelineScenario !== null) return _PipelineScenario;
-  try {
-    _PipelineScenario = require('../models/PipelineScenario');
-  } catch (e) {
-    _PipelineScenario = false; // sentinel: not available
-  }
-  return _PipelineScenario || null;
-}
+// scenario by slug and applies its failures[] to per-stage execution.
+// See backend/models/PipelineScenario.js for the schema and failure
+// type catalogue.
+const PipelineScenario = require('../models/PipelineScenario');
 
 /**
  * Pick a file extension for the temp submission file based on the
@@ -165,6 +155,11 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
       // fixtures they expect don't exist. Mark them skipped rather than
       // failing the whole pipeline on a fluke second-stage error.
       if (failedStageId !== null) {
+        // Even though this stage didn't run, record any scenario
+        // failures targeted at it so the report page can show what
+        // *would* have been injected. appliedFailures[] may be empty
+        // (no failures for this stage) or populated.
+        const { appliedFailures } = applyFailuresToStage(stage, failures);
         stageResults.push({
           stageId: stage.id,
           executorType: stage.executorType,
@@ -172,6 +167,7 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
           runtimeMs: 0,
           output: '',
           error: `upstream stage "${failedStageId}" failed; this stage did not run`,
+          failures: appliedFailures,
         });
         pipelinePassed = false;
         continue;
@@ -208,21 +204,132 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
 
 /**
  * Look up the scenario's failures[] for this problem. Section 11E
- * introduces the PipelineScenario model; in 11D the model doesn't exist
- * yet and we always return []. Failures returned here are still
- * ignored in 11D's stage runner (see runSingleStage's TODO); the lookup
- * itself is wired up so 11E only needs to add the application logic.
+ * introduces the PipelineScenario model; without a scenarioId (or
+ * with one that doesn't exist) we return [] and the pipeline runs
+ * with no injected failures.
+ *
+ * Returns an array of normalised failure objects of shape
+ *   { stageId, type, params: Map<string, any> }
+ * ready to be applied by runSingleStage.
  */
 async function resolveScenarioFailures(problem, scenarioId) {
   if (!scenarioId) return [];
-  const Scenario = getScenarioModel();
-  if (!Scenario) return []; // 11E hasn't landed yet
-  const scenario = await Scenario.findOne({
+  const scenario = await PipelineScenario.findOne({
     pipelineProblemId: problem._id,
     slug: scenarioId,
   });
   if (!scenario) return [];
-  return scenario.failures || [];
+  // Convert Mongoose Map params into plain Maps so runSingleStage can
+  // index them without going through the schema layer each time.
+  return (scenario.failures || []).map((f) => ({
+    stageId: f.stageId,
+    type: f.type,
+    params: f.params instanceof Map ? f.params : new Map(Object.entries(f.params || {})),
+  }));
+}
+
+/**
+ * Apply a scenario's failures[] to one specific stage. Returns
+ *   {
+ *     effectiveMemoryMb,   // docker --memory (defaults to stage override or router)
+ *     effectiveTimeoutMs,  // docker SIGKILL timeout
+ *     extraEnv,            // { KEY: 'value' } to add to the container env
+ *     appliedFailures[],   // for the stageResult's failures[] field
+ *   }
+ *
+ * Each failure has an `applied` boolean:
+ *   true  — the failure actually mutated the spawn
+ *   false — the failure is recorded for the report but not yet
+ *           applied (e.g. fixture mutations require the 11F fixture
+ *           layer; record-only for now)
+ *
+ * Applied failure types:
+ *   - oom_on_stage:    memoryMb → params.memoryMb (default 64m)
+ *   - slow_consumer:   passes PIPELINE_SLOW_CONSUMER_DELAY_MS env var;
+ *                      the per-tool runners don't currently honor it
+ *                      (record-only in 11E; runners can opt in later)
+ *
+ * Record-only failure types (will become applied in 11F):
+ *   - late_data, schema_drift, poison_message
+ *     — these mutate the input fixture set. The orchestrator doesn't
+ *       mount fixtures yet, so they're recorded with `applied: false`
+ *       and a note explaining why. 11F will implement the fixture
+ *       mutations and flip `applied` to true.
+ */
+function applyFailuresToStage(stage, allFailures) {
+  const config = getExecutorConfig(stage.executorType);
+  const stageFailures = (allFailures || []).filter((f) => f.stageId === stage.id);
+
+  let effectiveMemoryMb = stage.memoryMbOverride || config.memoryMb;
+  let effectiveTimeoutMs = stage.timeoutMsOverride || config.timeout;
+  const extraEnv = {};
+  const appliedFailures = [];
+
+  for (const f of stageFailures) {
+    const p = f.params || new Map();
+    const getNum = (k, def) => {
+      const v = p instanceof Map ? p.get(k) : p[k];
+      const n = typeof v === 'number' ? v : parseFloat(v);
+      return Number.isFinite(n) ? n : def;
+    };
+    const getStr = (k) => (p instanceof Map ? p.get(k) : p[k]) || '';
+
+    if (f.type === 'oom_on_stage') {
+      const mb = getNum('memoryMb', 64);
+      effectiveMemoryMb = mb;
+      appliedFailures.push({ type: f.type, params: p, applied: true, note: '' });
+    } else if (f.type === 'slow_consumer') {
+      const ms = getNum('delayMs', 100);
+      extraEnv.PIPELINE_SLOW_CONSUMER_DELAY_MS = String(ms);
+      appliedFailures.push({
+        type: f.type,
+        params: p,
+        applied: false,
+        note: `record-only in 11E: PIPELINE_SLOW_CONSUMER_DELAY_MS=${ms} is set as an env var but per-tool runners don't yet honor it; will be wired in 11F+ when runners opt in.`,
+      });
+    } else if (f.type === 'late_data') {
+      appliedFailures.push({
+        type: f.type,
+        params: p,
+        applied: false,
+        note: `record-only in 11E: fixture mutation requires the 11F fixture layer. Will swap to a late-events fixture for stage "${stage.id}".`,
+      });
+    } else if (f.type === 'schema_drift') {
+      const driftType = getStr('driftType');
+      const column = getStr('column');
+      const newName = getStr('newName');
+      appliedFailures.push({
+        type: f.type,
+        params: p,
+        applied: false,
+        note: `record-only in 11E: fixture mutation requires the 11F fixture layer. Drift: ${driftType} column "${column}"${newName ? ` → "${newName}"` : ''}.`,
+      });
+    } else if (f.type === 'poison_message') {
+      const fixtureName = getStr('fixtureName');
+      const recordIndex = getNum('recordIndex', -1);
+      appliedFailures.push({
+        type: f.type,
+        params: p,
+        applied: false,
+        note: `record-only in 11E: fixture mutation requires the 11F fixture layer. Will inject a malformed record into "${fixtureName}" at index ${recordIndex}.`,
+      });
+    } else {
+      // Unknown type — record with applied:false so it doesn't disappear.
+      appliedFailures.push({
+        type: f.type,
+        params: p,
+        applied: false,
+        note: `unknown failure type "${f.type}" — not applied`,
+      });
+    }
+  }
+
+  return {
+    effectiveMemoryMb,
+    effectiveTimeoutMs,
+    extraEnv,
+    appliedFailures,
+  };
 }
 
 /**
@@ -261,14 +368,17 @@ function normaliseStageCode(stageCode) {
  * the per-tool runners degrade gracefully (sql_runner.py returns [],
  * kafka_runner.sh skips seeding, etc.).
  *
- * Section 11E will read `failures` to apply pre-spawn mutations
- * (memoryMbOverride, fault injection via env vars). 11D ignores
- * failures — they're accepted but no-op until 11E lands.
+ * Section 11E — failure injection. `allFailures` is the full scenario
+ * failures[] (resolved by resolveScenarioFailures). The stage-specific
+ * subset is computed by applyFailuresToStage(), which returns the
+ * effective memory/timeout overrides, extra env, and a record of what
+ * was actually applied vs record-only. The `appliedFailures` array
+ * ends up in the per-stage PipelineRun record for the report page.
  */
-function runSingleStage(stage, code, failures) {
+function runSingleStage(stage, code, allFailures) {
   const config = getExecutorConfig(stage.executorType);
-  const stageMemoryMb = stage.memoryMbOverride || config.memoryMb;
-  const stageTimeoutMs = stage.timeoutMsOverride || config.timeout;
+  const { effectiveMemoryMb, effectiveTimeoutMs, extraEnv, appliedFailures } =
+    applyFailuresToStage(stage, allFailures);
   const extension = pickExtension(config.image);
 
   return new Promise((resolve) => {
@@ -283,7 +393,7 @@ function runSingleStage(stage, code, failures) {
     try {
       fs.writeFileSync(tmpFile, code || '', 'utf-8');
     } catch (e) {
-      resolve(stageResultError(stage, `could not write stage code: ${e.message}`, 0));
+      resolve(stageResultError(stage, `could not write stage code: ${e.message}`, 0, appliedFailures));
       return;
     }
 
@@ -293,12 +403,12 @@ function runSingleStage(stage, code, failures) {
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill('SIGKILL');
-    }, stageTimeoutMs);
+    }, effectiveTimeoutMs);
 
     const dockerArgs = [
       'run', '--rm',
       '--net', 'none',
-      '--memory', `${stageMemoryMb}m`,
+      '--memory', `${effectiveMemoryMb}m`,
       '--cpus', '1.0',
       '-v', `${tmpFile}:/sandbox/solution${extension}:ro`,
     ];
@@ -310,7 +420,7 @@ function runSingleStage(stage, code, failures) {
 
     const proc = cp.spawn('docker', dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, PYTHONUNBUFFERED: '1', ...extraEnv },
     });
 
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
@@ -322,7 +432,7 @@ function runSingleStage(stage, code, failures) {
       try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
 
       if (timedOut) {
-        resolve(stageResultError(stage, 'Time Limit Exceeded', stageTimeoutMs));
+        resolve(stageResultError(stage, 'Time Limit Exceeded', effectiveTimeoutMs, appliedFailures));
         return;
       }
       if (exitCode !== 0 || stderr) {
@@ -339,10 +449,11 @@ function runSingleStage(stage, code, failures) {
             runtimeMs: parsed.runtime_ms || Math.round(runtimeMs * 100) / 100,
             output: (parsed.output || '').slice(0, 4000),
             error: parsed.error || '',
+            failures: appliedFailures,
           });
           return;
         }
-        resolve(stageResultError(stage, cleanedErr || `Exit code: ${exitCode}`, runtimeMs));
+        resolve(stageResultError(stage, cleanedErr || `Exit code: ${exitCode}`, runtimeMs, appliedFailures));
         return;
       }
 
@@ -352,6 +463,7 @@ function runSingleStage(stage, code, failures) {
           stage,
           `Could not parse runner output: ${stdout.trim().slice(0, 200)}`,
           runtimeMs,
+          appliedFailures,
         ));
         return;
       }
@@ -362,13 +474,14 @@ function runSingleStage(stage, code, failures) {
         runtimeMs: parsed.runtime_ms || Math.round(runtimeMs * 100) / 100,
         output: (parsed.output || '').slice(0, 4000),
         error: parsed.error || '',
+        failures: appliedFailures,
       });
     });
 
     proc.on('error', (err) => {
       clearTimeout(timer);
       try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
-      resolve(stageResultError(stage, `Execution error: ${err.message}`, 0));
+      resolve(stageResultError(stage, `Execution error: ${err.message}`, 0, appliedFailures));
     });
   });
 }
@@ -390,7 +503,7 @@ function tryParseRunnerJson(stdout) {
   }
 }
 
-function stageResultError(stage, error, runtimeMs) {
+function stageResultError(stage, error, runtimeMs, appliedFailures) {
   return {
     stageId: stage.id,
     executorType: stage.executorType,
@@ -398,10 +511,14 @@ function stageResultError(stage, error, runtimeMs) {
     runtimeMs: Math.round((runtimeMs || 0) * 100) / 100,
     output: '',
     error: String(error || '').slice(0, 4000),
+    failures: appliedFailures || [],
   };
 }
 
 module.exports = {
   runPipeline,
   topoSort,
+  // Section 11E — exported for unit tests.
+  applyFailuresToStage,
+  resolveScenarioFailures,
 };

@@ -47,6 +47,19 @@ const stageResultSchema = new mongoose.Schema({
   runtimeMs: { type: Number, default: 0 },
   output: { type: String, default: '' },   // truncated stdout / CSV head
   error: { type: String, default: '' },
+  // Section 11E: failures applied to this stage for this run.
+  // Each entry is a normalised { stageId, type, params: Map } as
+  // resolved by pipelineOrchestrator.resolveScenarioFailures.
+  // Recorded so the report page (11H) can show what was injected.
+  failures: [{
+    type: {
+      type: String,
+      enum: ['oom_on_stage', 'late_data', 'schema_drift', 'poison_message', 'slow_consumer'],
+    },
+    params: { type: Map, of: mongoose.Schema.Types.Mixed, default: () => new Map() },
+    applied: { type: Boolean, default: true },  // false when recorded but not yet implemented
+    note: { type: String, default: '' },         // explanation when applied=false
+  }],
 }, { _id: false });
 
 const pipelineRunSchema = new mongoose.Schema({
