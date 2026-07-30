@@ -7,13 +7,18 @@ import './AIHintPanel.css';
  * current problem. Spec section 6D.
  *
  *   - "Get hint" button (disabled while a submission is running)
- *   - POST /api/hints with { problemId, code, executorType, submissionHistory }
+ *   - POST /api/hints with { problemId, code, executorType, submissionHistory, isPipeline? }
  *   - SSE-style streaming via fetch + ReadableStream (text/event-stream)
  *   - Markdown rendered with react-markdown
  *   - Warns: "Hints are disabled during timed assessments"
  *
  * The panel is intentionally a self-contained component so ProblemSolver can
  * drop it in without knowing about the streaming protocol.
+ *
+ * Section 11H — the `isPipeline` flag flips the panel into pipeline-hint
+ * mode. The backend uses it to load from PipelineProblem / PipelineRun
+ * and produce stage-aware hints (Section 11G). The flag is optional and
+ * defaults to false, so the existing single-tool flow is unchanged.
  */
 function AIHintPanel({
   problemId,
@@ -22,6 +27,7 @@ function AIHintPanel({
   submissionHistory,
   isExecuting,
   isTimedAssessment,
+  isPipeline,
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [hint, setHint] = useState('');
@@ -51,6 +57,9 @@ function AIHintPanel({
           problemId,
           code,
           executorType,
+          // Section 11H — opt into pipeline-hint mode. The backend
+          // routes PipelineProblem / PipelineRun when this is true.
+          isPipeline: !!isPipeline,
           // Spec 6D: stream the last 3 submissions. submissionHistory is
           // expected to be an array of submission objects in chronological
           // order; we take the tail and trim to the executor-aware fields.
@@ -62,6 +71,10 @@ function AIHintPanel({
               error: s.error,
               executorType: s.executorType,
               toolVersion: s.toolVersion,
+              // Section 11G — pipeline runs carry stageResults[]; pass it
+              // through so the system prompt can branch on the failing
+              // stage. Non-pipeline history items don't have it.
+              stageResults: s.stageResults,
             })),
         }),
         signal: controller.signal,
@@ -135,7 +148,7 @@ function AIHintPanel({
       setLoading(false);
       abortRef.current = null;
     }
-  }, [problemId, code, executorType, submissionHistory]);
+  }, [problemId, code, executorType, submissionHistory, isPipeline]);
 
   const cancel = () => {
     if (abortRef.current) {

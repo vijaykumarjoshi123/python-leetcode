@@ -90,4 +90,24 @@ export const assessmentsAPI = {
   joinByToken: (token) => api.get(`/api/assessments/join/${token}`),
 };
 
+// ==================== Pipelines API (Tier 3 / Section 11H) ====================
+// Wraps the multi-tool pipeline endpoints (see backend/routes/pipelines.js).
+// `run` is synchronous — the orchestrator blocks until all stages finish,
+// then returns the persisted PipelineRun document. `getRun` is owner-only;
+// `getProblem` is public metadata (no fixture paths leaked).
+//   - run({ pipelineProblemId, stageCode, scenarioId })   POST /api/pipelines/run
+//   - getRun(runId)                                       GET  /api/pipelines/run/:runId
+//   - getProblem(problemId)                               GET  /api/pipelines/problem/:problemId
+//   - listProblems()                                      GET  /api/pipelines/problems
+//   - listRuns({ limit })                                 GET  /api/pipelines/runs
+//   - listScenarios(problemId)                            GET  /api/pipelines/problem/:problemId/scenarios
+export const pipelinesAPI = {
+  run: (data) => api.post('/api/pipelines/run', data),
+  getRun: (runId) => api.get(`/api/pipelines/run/${runId}`),
+  getProblem: (problemId) => api.get(`/api/pipelines/problem/${problemId}`),
+  listProblems: () => api.get('/api/pipelines/problems'),
+  listRuns: ({ limit } = {}) => api.get('/api/pipelines/runs', { params: { limit } }),
+  listScenarios: (problemId) => api.get(`/api/pipelines/problem/${problemId}/scenarios`),
+};
+
 export default api;

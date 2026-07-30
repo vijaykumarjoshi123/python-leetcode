@@ -45,6 +45,13 @@ function Navbar() {
               {user?.accountType === 'company' && (
                 <Link to="/assessments" className="nav-link">Assessments</Link>
               )}
+              {/* Tier 3 / Section 11H — conditional Pipelines link. The
+                  server enforces the gate too (POST /api/pipelines/run
+                  returns 403 if user.pipelineEnabled is false), but
+                  hiding the link keeps the UX tidy for opted-out users. */}
+              {user?.pipelineEnabled && (
+                <Link to="/pipelines" className="nav-link">Pipelines</Link>
+              )}
               <button onClick={handleLogout} className="btn-logout">Logout</button>
             </div>
           ) : (

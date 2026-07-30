@@ -11,6 +11,10 @@ import Register from './pages/Register';
 import Profile from './pages/Profile';
 import AssessmentDashboard from './pages/AssessmentDashboard';
 import CandidateReport from './pages/CandidateReport';
+// Tier 3 / Section 11H — pipeline simulator frontend surfaces.
+import PipelineIndex from './pages/PipelineIndex';
+import PipelineProblemPage from './pages/PipelineProblemPage';
+import PipelineReport from './pages/PipelineReport';
 import './App.css';
 
 function App() {
@@ -36,6 +40,14 @@ function App() {
             gated server-side. */}
         <Route path="/assessments" element={<AssessmentDashboard />} />
         <Route path="/assessments/:id/report/:email" element={<CandidateReport />} />
+        {/* Tier 3 / Section 11H — pipeline simulator frontend routes.
+            All three routes are open on the client; the server gates
+            /run behind user.pipelineEnabled and 401s unauthenticated
+            callers. The navbar link is the only place we hide this
+            from non-flagged users. */}
+        <Route path="/pipelines" element={<PipelineIndex />} />
+        <Route path="/pipelines/:id" element={<PipelineProblemPage />} />
+        <Route path="/pipelines/run/:runId" element={<PipelineReport />} />
       </Routes>
     </Router>
   );

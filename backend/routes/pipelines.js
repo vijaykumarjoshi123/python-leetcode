@@ -28,6 +28,7 @@ const mongoose = require('mongoose');
 const auth = require('../middleware/auth');
 const PipelineProblem = require('../models/PipelineProblem');
 const PipelineRun = require('../models/PipelineRun');
+const PipelineScenario = require('../models/PipelineScenario');
 const User = require('../models/User');
 const { runPipeline } = require('../services/pipelineOrchestrator');
 
@@ -243,6 +244,79 @@ router.get('/runs', auth, async (req, res) => {
       .limit(limit)
       .select('pipelineProblemId scenarioId stageResults totalRuntimeMs passed error submittedAt');
     res.json({ runs });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- GET /api/pipelines/problems ----
+// Section 11H — public list of all PipelineProblem metadata. Used by
+// the frontend's Pipelines landing/index page (gated by
+// user.pipelineEnabled on the navbar link) and the run-history view.
+// We expose only the fields safe to render: title/slug/difficulty/
+// tracks, plus a count of stages and a count of scenarios (no fixture
+// paths or grading secrets). The full stage layout is fetched per-
+// problem via /problem/:id when the user opens one.
+router.get('/problems', async (req, res) => {
+  try {
+    const problems = await PipelineProblem.find({})
+      .select('title slug description difficulty tracks stages fixtureVersion createdAt')
+      .sort({ createdAt: -1 });
+    res.json({
+      problems: problems.map((p) => ({
+        id: p._id,
+        title: p.title,
+        slug: p.slug,
+        description: (p.description || '').slice(0, 280),
+        difficulty: p.difficulty,
+        tracks: p.tracks || [],
+        stageCount: (p.stages || []).length,
+        fixtureVersion: p.fixtureVersion,
+        createdAt: p.createdAt,
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---- GET /api/pipelines/problem/:problemId/scenarios ----
+// Section 11H — list the failure-injection scenarios seeded for a
+// pipeline problem (Section 11E). The frontend's problem page uses
+// this to render a "Run with scenario" picker; the user can pick a
+// scenario, hit Run, and the orchestrator (Section 11D/11E) applies
+// the failures inline. We expose the scenario's slug/name/description
+// (so the picker is human-readable) plus a summary of which stage each
+// failure targets — the full `params` map is intentionally NOT leaked
+// (it can include things like memoryMb for OOM, which would let a
+// cheater bypass the diagnosis exercise).
+router.get('/problem/:problemId/scenarios', async (req, res) => {
+  const { problemId } = req.params;
+  if (!isValidObjectId(problemId)) {
+    return res.status(400).json({ error: 'problemId is not a valid ObjectId' });
+  }
+  try {
+    const scenarios = await PipelineScenario.find({ pipelineProblemId: problemId })
+      .select('slug name description failures expectedDiagnosis')
+      .sort({ slug: 1 });
+    res.json({
+      scenarios: scenarios.map((s) => ({
+        slug: s.slug,
+        name: s.name,
+        description: s.description,
+        // Compact the failures[] to a list of {stageId, type} so the
+        // UI can render a "Targets: enrich (oom_on_stage)" pill without
+        // leaking params like memoryMb / delayHours.
+        failures: (s.failures || []).map((f) => ({
+          stageId: f.stageId,
+          type: f.type,
+        })),
+        // The expected diagnosis is a hint, not a secret — the user has
+        // already committed to the diagnosis exercise by picking the
+        // scenario. Surfacing it is intentional.
+        expectedDiagnosis: s.expectedDiagnosis || '',
+      })),
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
