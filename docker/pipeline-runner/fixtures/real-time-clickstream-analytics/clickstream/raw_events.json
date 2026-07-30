@@ -1,0 +1,82 @@
+[
+  {
+    "event_id": "evt-001",
+    "user_id": "u-101",
+    "session_id": "sess-aaa",
+    "url": "/home",
+    "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "event_ts": "2026-07-29T10:00:00Z"
+  },
+  {
+    "event_id": "evt-002",
+    "user_id": "u-101",
+    "session_id": "sess-aaa",
+    "url": "/product/42",
+    "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "event_ts": "2026-07-29T10:00:05Z"
+  },
+  {
+    "event_id": "evt-003",
+    "user_id": "u-102",
+    "session_id": "sess-bbb",
+    "url": "/home",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "event_ts": "2026-07-29T10:01:30Z"
+  },
+  {
+    "event_id": "evt-004",
+    "user_id": "u-102",
+    "session_id": "sess-bbb",
+    "url": "/checkout",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "event_ts": "2026-07-29T10:01:45Z"
+  },
+  {
+    "event_id": "evt-005",
+    "user_id": "u-103",
+    "session_id": "sess-ccc",
+    "url": "/search?q=widgets",
+    "user_agent": "Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "event_ts": "2026-07-29T11:15:00Z"
+  },
+  {
+    "event_id": "evt-006",
+    "user_id": "u-104",
+    "session_id": "sess-ddd",
+    "url": "/home",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+    "event_ts": "2026-07-29T11:30:00Z"
+  },
+  {
+    "event_id": "evt-007",
+    "user_id": "u-104",
+    "session_id": "sess-ddd",
+    "url": "/product/9",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+    "event_ts": "2026-07-29T11:30:30Z"
+  },
+  {
+    "event_id": "evt-008",
+    "user_id": "u-105",
+    "session_id": "sess-eee",
+    "url": "/cart",
+    "user_agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
+    "event_ts": "2026-07-29T12:00:00Z"
+  },
+  {
+    "event_id": "evt-009",
+    "user_id": "u-101",
+    "session_id": "sess-aaa",
+    "url": "/product/42",
+    "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "event_ts": "2026-07-29T13:00:00Z"
+  },
+  {
+    "event_id": "evt-010",
+    "user_id": "u-102",
+    "session_id": "sess-bbb",
+    "url": "/product/42",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "event_ts": "2026-07-29T13:00:15Z"
+  }
+]

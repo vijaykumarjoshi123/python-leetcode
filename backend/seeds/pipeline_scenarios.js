@@ -33,28 +33,29 @@
 module.exports = [
   // ===================================================================
   // Pipeline: real-time-clickstream-analytics (Section 11F)
+  //   stages: ingest (kafka) → enrich (pyspark) → load (iceberg) → report (dbt)
   // ===================================================================
 
   // ---------- oom_on_stage ----------
   {
     pipelineProblemSlug: 'real-time-clickstream-analytics',
-    slug: 'oom-on-score',
-    name: 'OOM on the scoring stage',
-    description: 'The Spark scoring stage runs out of memory mid-job. Diagnose by reading the executor stderr and adjusting either the executor memoryMbOverride or the user code partition size.',
+    slug: 'oom-on-enrich',
+    name: 'OOM on the enrichment stage',
+    description: 'The Spark enrichment stage runs out of memory mid-job. Diagnose by reading the executor stderr and adjusting either the executor memoryMbOverride or the user code partition size.',
     failures: [
-      { stageId: 'score', type: 'oom_on_stage', params: { memoryMb: 64 } },
+      { stageId: 'enrich', type: 'oom_on_stage', params: { memoryMb: 64 } },
     ],
-    expectedDiagnosis: 'Look for "java.lang.OutOfMemoryError" or "Container killed by YARN" in the scoring stage stderr. Either reduce the user code partition size or the per-stage memoryMbOverride.',
+    expectedDiagnosis: 'Look for "java.lang.OutOfMemoryError" or "Container killed by YARN" in the enrich stage stderr. Either reduce the user code partition size or the per-stage memoryMbOverride.',
   },
   {
     pipelineProblemSlug: 'real-time-clickstream-analytics',
-    slug: 'oom-on-enrich',
-    name: 'OOM on the enrichment stage',
-    description: 'The DuckDB enrichment stage exceeds its memory budget because the join produces a cartesian product on a missing filter.',
+    slug: 'oom-on-load',
+    name: 'OOM on the Iceberg load stage',
+    description: 'The Iceberg load stage exceeds its memory budget because the parquet file is large and Iceberg\'s in-memory catalog buffers the whole schema.',
     failures: [
-      { stageId: 'enrich', type: 'oom_on_stage', params: { memoryMb: 128 } },
+      { stageId: 'load', type: 'oom_on_stage', params: { memoryMb: 128 } },
     ],
-    expectedDiagnosis: 'DuckDB emits "Out of Memory" on a cartesian join. Add a join predicate in the user SQL or pre-filter the join keys before joining.',
+    expectedDiagnosis: 'Iceberg emits "Out of Memory" while building the table metadata. Either pre-aggregate upstream or ask for more memory via the stage\'s memoryMbOverride.',
   },
 
   // ---------- late_data ----------
@@ -62,11 +63,11 @@ module.exports = [
     pipelineProblemSlug: 'real-time-clickstream-analytics',
     slug: 'late-events',
     name: 'Late-arriving click events',
-    description: 'The Kafka topic includes events with timestamps up to 3 hours past the current watermark. The scoring stage must tolerate this without double-counting.',
+    description: 'The Kafka topic includes events with timestamps up to 3 hours past the current watermark. The enrichment stage must tolerate this without double-counting.',
     failures: [
       { stageId: 'ingest', type: 'late_data', params: { fixtureName: 'clickstream', delayHours: 3 } },
     ],
-    expectedDiagnosis: 'Watermark logic in the scoring stage should allow up to N hours of lateness. If the user code drops events older than the watermark, late events are silently lost. Use event-time windowing with a generous allowed lateness.',
+    expectedDiagnosis: 'Watermark logic in the enrichment stage should allow up to N hours of lateness. If the user code drops events older than the watermark, late events are silently lost. Use event-time windowing with a generous allowed lateness.',
   },
 
   // ---------- schema_drift ----------
@@ -86,7 +87,7 @@ module.exports = [
     name: 'Dropped user_agent column',
     description: 'The pipeline no longer emits `user_agent` (privacy scrub). The dbt report model still references it.',
     failures: [
-      { stageId: 'score', type: 'schema_drift', params: { driftType: 'drop', column: 'user_agent' } },
+      { stageId: 'enrich', type: 'schema_drift', params: { driftType: 'drop', column: 'user_agent' } },
     ],
     expectedDiagnosis: 'dbt run fails with "column user_agent not found". Remove the reference in the report model or replace with a derived field (e.g. device_class).',
   },
@@ -107,10 +108,10 @@ module.exports = [
   {
     pipelineProblemSlug: 'real-time-clickstream-analytics',
     slug: 'slow-consumer',
-    name: 'Slow Kafka consumer in the scoring stage',
-    description: 'The Spark scoring stage\'s Kafka consumer artificially waits 200ms between reads, simulating a slow downstream consumer. Throughput drops but no data is lost.',
+    name: 'Slow Kafka consumer in the ingest stage',
+    description: 'The Kafka consumer in the ingest stage artificially waits 200ms between reads, simulating a slow downstream consumer. Throughput drops but no data is lost.',
     failures: [
-      { stageId: 'score', type: 'slow_consumer', params: { delayMs: 200 } },
+      { stageId: 'ingest', type: 'slow_consumer', params: { delayMs: 200 } },
     ],
     expectedDiagnosis: 'The pipeline still passes (no data loss) but consumer lag grows. Acceptable for development; in production you would investigate the slow batch interval or the join cardinality.',
   },
@@ -119,12 +120,12 @@ module.exports = [
   {
     pipelineProblemSlug: 'real-time-clickstream-analytics',
     slug: 'composite-cascade',
-    name: 'OOM-on-score followed by late-data in score\'s input',
-    description: 'A composite scenario: the scoring stage runs out of memory AND receives late events. The user has to fix both for the pipeline to pass.',
+    name: 'OOM-on-enrich followed by late-data in ingest',
+    description: 'A composite scenario: the enrichment stage runs out of memory AND receives late events from ingest. The user has to fix both for the pipeline to pass.',
     failures: [
-      { stageId: 'score', type: 'oom_on_stage', params: { memoryMb: 64 } },
+      { stageId: 'enrich', type: 'oom_on_stage', params: { memoryMb: 64 } },
       { stageId: 'ingest', type: 'late_data', params: { fixtureName: 'clickstream', delayHours: 3 } },
     ],
-    expectedDiagnosis: 'Two root causes — fix the OOM first (lower partitions or increase memoryMbOverride), then handle late data in the same stage (windowing with allowed lateness).',
+    expectedDiagnosis: 'Two root causes — fix the OOM first (lower partitions or increase memoryMbOverride), then handle late data in the enrichment stage (windowing with allowed lateness).',
   },
 ];

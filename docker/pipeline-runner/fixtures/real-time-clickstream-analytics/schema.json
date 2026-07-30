@@ -1,0 +1,6 @@
+[
+  {
+    "table": "clickstream_enriched",
+    "file": "clickstream_enriched.parquet"
+  }
+]

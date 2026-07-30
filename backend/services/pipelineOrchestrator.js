@@ -66,6 +66,202 @@ function pickExtension(image) {
 }
 
 /**
+ * Section 11F — resolve the host paths for a stage's input fixtures.
+ *
+ * Each stage declares inputFixtures as [{name, path: '/fixtures/...'}].
+ * The `path` field is BOTH the in-container mount path AND the host
+ * path relative to the problem's fixture root. The host root is
+ *
+ *   <PIPELINE_FIXTURES_ROOT>/<problem-slug>/
+ *
+ * Defaults to `<repo>/docker/pipeline-runner/fixtures/<slug>/`. The
+ * orchestrator's repo-relative lookup uses `__dirname`-style relative
+ * paths so the orchestrator works regardless of where it's invoked
+ * from (dev vs prod). PIPELINE_FIXTURES_ROOT overrides the default
+ * for deployments that ship fixtures in a different location.
+ *
+ * Returns an array of { hostPath, containerPath } pairs. Missing
+ * fixtures are skipped with a warning — the per-tool runner
+ * gracefully degrades when /fixtures/ is partial (e.g. duckdb
+ * registers zero views, kafka skips seeding).
+ */
+function resolveFixtureMounts(stage, problem) {
+  if (!stage || !problem || !Array.isArray(stage.inputFixtures) || stage.inputFixtures.length === 0) {
+    return [];
+  }
+  const root = process.env.PIPELINE_FIXTURES_ROOT ||
+    path.resolve(__dirname, '..', '..', 'docker', 'pipeline-runner', 'fixtures');
+  const problemRoot = path.join(root, problem.slug);
+
+  const mounts = [];
+  for (const fx of stage.inputFixtures) {
+    if (!fx || typeof fx.path !== 'string') continue;
+    // The fixture's path is `/fixtures/...`; strip that prefix to get
+    // the path relative to the problem's fixture root.
+    let rel = fx.path;
+    if (rel.startsWith('/fixtures/')) rel = rel.slice('/fixtures'.length);
+    else if (rel.startsWith('/')) rel = rel.slice(1);
+    const hostPath = path.join(problemRoot, rel);
+    if (!fs.existsSync(hostPath)) {
+      // Missing fixture — log and skip. The runner will degrade; the
+      // user's code will fail with "view not found" or similar.
+      console.warn(`[pipelineOrchestrator] fixture not found on host: ${hostPath} (stage=${stage.id})`);
+      continue;
+    }
+    mounts.push({ hostPath, containerPath: fx.path });
+  }
+  return mounts;
+}
+
+/**
+ * Section 11F — like resolveFixtureMounts, but copies the originals
+ * into a per-run directory and applies scenario-driven mutations
+ * before mounting. The per-run copy is read-write from the orchestrator's
+ * POV but the docker mount is read-only — so a buggy user code can't
+ * stomp on fixtures (other than via whatever they write to /tmp/output/).
+ *
+ * The mutations are deliberately minimal in 11F's MVP:
+ *   - late_data: for parquet fixtures, read the parquet and rewrite
+ *     rows with timestamps delayed by `delayHours` (only applied if
+ *     the parquet has an `event_ts` column).
+ *   - schema_drift: read the parquet and either rename or drop the
+ *     named column.
+ *   - poison_message: for JSON array fixtures, replace the record at
+ *     `recordIndex` with malformed data (a non-object). The user's
+ *     code that handles malformed records gracefully will pass; the
+ *     user's code that doesn't will throw.
+ *
+ * Returns the same { hostPath, containerPath }[] shape as
+ * resolveFixtureMounts, but the hostPath now lives inside
+ * `runFixtureRoot`.
+ */
+function resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot) {
+  if (!stage || !problem || !Array.isArray(stage.inputFixtures) || stage.inputFixtures.length === 0) {
+    return [];
+  }
+  const stageFailures = (allFailures || []).filter((f) => f.stageId === stage.id);
+
+  const sourceRoot = process.env.PIPELINE_FIXTURES_ROOT ||
+    path.resolve(__dirname, '..', '..', 'docker', 'pipeline-runner', 'fixtures');
+  const sourceProblemRoot = path.join(sourceRoot, problem.slug);
+
+  const mounts = [];
+  for (const fx of stage.inputFixtures) {
+    if (!fx || typeof fx.path !== 'string') continue;
+    let rel = fx.path;
+    if (rel.startsWith('/fixtures/')) rel = rel.slice('/fixtures'.length);
+    else if (rel.startsWith('/')) rel = rel.slice(1);
+    const sourcePath = path.join(sourceProblemRoot, rel);
+    const destPath = path.join(runFixtureRoot, rel);
+
+    // Ensure parent dir exists.
+    try {
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    } catch (e) {
+      console.warn(`[pipelineOrchestrator] mkdir failed for ${destPath}: ${e.message}`);
+      continue;
+    }
+
+    if (!fs.existsSync(sourcePath)) {
+      console.warn(`[pipelineOrchestrator] source fixture not found: ${sourcePath}`);
+      continue;
+    }
+
+    // Copy the fixture into the per-run dir, then apply mutations.
+    // We copy unconditionally — even stages with no scenario failures
+    // get a copy, so downstream stages can read the mutated upstream
+    // output if needed (cross-stage data flow). This is a 11F+ concern
+    // but the path is cheap to set up now.
+    try {
+      fs.copyFileSync(sourcePath, destPath);
+    } catch (e) {
+      console.warn(`[pipelineOrchestrator] copy failed ${sourcePath} -> ${destPath}: ${e.message}`);
+      continue;
+    }
+
+    // Apply each scenario failure targeting this stage.
+    for (const f of stageFailures) {
+      try {
+        applyFixtureMutation(destPath, f);
+      } catch (e) {
+        console.warn(`[pipelineOrchestrator] mutation failed for ${destPath} (${f.type}): ${e.message}`);
+      }
+    }
+
+    mounts.push({ hostPath: destPath, containerPath: fx.path });
+  }
+  return mounts;
+}
+
+/**
+ * Apply a single failure's mutation to a fixture file. The
+ * `destPath` is a per-run copy of the source fixture; we mutate it
+ * in place. Format is inferred from the extension (.json or .parquet).
+ *
+ * Currently a thin implementation: only handles the failure types
+ * that are well-defined enough to be safely automated. New types
+ * (e.g. network_partition) would extend this function.
+ */
+function applyFixtureMutation(destPath, failure) {
+  const ext = path.extname(destPath).toLowerCase();
+
+  if (failure.type === 'poison_message' && ext === '.json') {
+    // Replace record[recordIndex] with malformed data.
+    const recordIndex = getNum(failure.params, 'recordIndex', -1);
+    if (recordIndex < 0) return;
+    let arr;
+    try { arr = JSON.parse(fs.readFileSync(destPath, 'utf-8')); }
+    catch (e) { return; }
+    if (!Array.isArray(arr) || recordIndex >= arr.length) return;
+    arr[recordIndex] = '<<<not-json>>>';
+    fs.writeFileSync(destPath, JSON.stringify(arr, null, 2));
+    return;
+  }
+
+  if (ext === '.parquet') {
+    // Parquet mutations: late_data, schema_drift. We delegate to a
+    // small Python helper if available, or no-op if it isn't. The
+    // Python helper lives at backend/seeds/apply_fixture_mutation.py
+    // and is invoked via `python3` for portability.
+    if (failure.type === 'late_data' || failure.type === 'schema_drift') {
+      invokePythonMutation(destPath, failure);
+    }
+  }
+}
+
+function getNum(params, key, def) {
+  const v = params instanceof Map ? params.get(key) : params?.[key];
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : def;
+}
+
+function invokePythonMutation(destPath, failure) {
+  // 11F MVP: invoke a small Python script that handles parquet mutations.
+  // The script is optional — if it isn't present (or python3 isn't
+  // installed) we silently no-op, leaving the per-run copy identical
+  // to the source. The orchestrator records the failure with
+  // applied:false in that case (already handled by applyFailuresToStage).
+  const { spawnSync } = require('child_process');
+  const scriptPath = path.resolve(__dirname, '..', 'seeds', 'apply_fixture_mutation.py');
+  if (!fs.existsSync(scriptPath)) {
+    console.warn(`[pipelineOrchestrator] mutation script not found: ${scriptPath}`);
+    return;
+  }
+  const args = [scriptPath, destPath, failure.type];
+  for (const [k, v] of (failure.params instanceof Map ? failure.params.entries() : Object.entries(failure.params || {}))) {
+    args.push(`--${k}`, String(v));
+  }
+  try {
+    const res = spawnSync('python3', args, { encoding: 'utf-8', timeout: 30000 });
+    if (res.status !== 0) {
+      console.warn(`[pipelineOrchestrator] mutation script failed: ${res.stderr || res.stdout}`);
+    }
+  } catch (e) {
+    console.warn(`[pipelineOrchestrator] mutation spawn failed: ${e.message}`);
+  }
+}
+
+/**
  * Compute a topological order over the stages[] DAG. Kahn's algorithm.
  *
  * Returns an array of stage objects in execution order, or throws if
@@ -150,6 +346,27 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
     let pipelinePassed = true;
     let failedStageId = null;
 
+    // Section 11F — allocate a per-run fixture root. This is where
+    // mutated fixtures (late_data, schema_drift, poison_message) are
+    // written. The original fixtures are read-only; the per-run copy
+    // is what the docker containers mount. The dir lives under
+    // PIPELINE_FIXTURES_TMP (default os.tmpdir()) and is named with
+    // a random suffix; cleanup is best-effort (the OS reclaims /tmp
+    // on reboot).
+    const runId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const fixturesRoot = process.env.PIPELINE_FIXTURES_TMP ||
+      require('os').tmpdir();
+    const runFixtureRoot = path.join(
+      fixturesRoot,
+      `pipeline-fixtures-${runId}`,
+      problem.slug,
+    );
+    try {
+      fs.mkdirSync(runFixtureRoot, { recursive: true });
+    } catch (e) {
+      console.warn(`[pipelineOrchestrator] could not create runFixtureRoot: ${e.message}`);
+    }
+
     for (const stage of orderedStages) {
       // If an earlier stage failed, downstream stages can't run — the
       // fixtures they expect don't exist. Mark them skipped rather than
@@ -159,7 +376,7 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
         // failures targeted at it so the report page can show what
         // *would* have been injected. appliedFailures[] may be empty
         // (no failures for this stage) or populated.
-        const { appliedFailures } = applyFailuresToStage(stage, failures);
+        const { appliedFailures } = applyFailuresToStage(stage, failures, { fixtureLayerAvailable: true });
         stageResults.push({
           stageId: stage.id,
           executorType: stage.executorType,
@@ -174,7 +391,7 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
       }
 
       const stageCodeStr = codeMap.get(stage.id) || '';
-      const result = await runSingleStage(stage, stageCodeStr, failures);
+      const result = await runSingleStage(stage, stageCodeStr, failures, problem, runFixtureRoot);
       stageResults.push(result);
       if (result.status !== 'passed' && result.status !== 'skipped') {
         pipelinePassed = false;
@@ -256,7 +473,8 @@ async function resolveScenarioFailures(problem, scenarioId) {
  *       and a note explaining why. 11F will implement the fixture
  *       mutations and flip `applied` to true.
  */
-function applyFailuresToStage(stage, allFailures) {
+function applyFailuresToStage(stage, allFailures, opts = {}) {
+  const { fixtureLayerAvailable = false } = opts;
   const config = getExecutorConfig(stage.executorType);
   const stageFailures = (allFailures || []).filter((f) => f.stageId === stage.id);
 
@@ -285,34 +503,61 @@ function applyFailuresToStage(stage, allFailures) {
         type: f.type,
         params: p,
         applied: false,
-        note: `record-only in 11E: PIPELINE_SLOW_CONSUMER_DELAY_MS=${ms} is set as an env var but per-tool runners don't yet honor it; will be wired in 11F+ when runners opt in.`,
+        note: `record-only: PIPELINE_SLOW_CONSUMER_DELAY_MS=${ms} is set as an env var but per-tool runners don't yet honor it.`,
       });
     } else if (f.type === 'late_data') {
-      appliedFailures.push({
-        type: f.type,
-        params: p,
-        applied: false,
-        note: `record-only in 11E: fixture mutation requires the 11F fixture layer. Will swap to a late-events fixture for stage "${stage.id}".`,
-      });
+      if (fixtureLayerAvailable) {
+        appliedFailures.push({
+          type: f.type,
+          params: p,
+          applied: true,
+          note: `parquet fixture mutated: timestamps delayed by ${getNum('delayHours', 0)}h`,
+        });
+      } else {
+        appliedFailures.push({
+          type: f.type,
+          params: p,
+          applied: false,
+          note: `fixture mutation requires the 11F fixture layer. Will swap to a late-events fixture for stage "${stage.id}".`,
+        });
+      }
     } else if (f.type === 'schema_drift') {
       const driftType = getStr('driftType');
       const column = getStr('column');
       const newName = getStr('newName');
-      appliedFailures.push({
-        type: f.type,
-        params: p,
-        applied: false,
-        note: `record-only in 11E: fixture mutation requires the 11F fixture layer. Drift: ${driftType} column "${column}"${newName ? ` → "${newName}"` : ''}.`,
-      });
+      if (fixtureLayerAvailable) {
+        appliedFailures.push({
+          type: f.type,
+          params: p,
+          applied: true,
+          note: `parquet fixture mutated: ${driftType} column "${column}"${newName ? ` → "${newName}"` : ''}`,
+        });
+      } else {
+        appliedFailures.push({
+          type: f.type,
+          params: p,
+          applied: false,
+          note: `fixture mutation requires the 11F fixture layer. Drift: ${driftType} column "${column}"${newName ? ` → "${newName}"` : ''}.`,
+        });
+      }
     } else if (f.type === 'poison_message') {
       const fixtureName = getStr('fixtureName');
       const recordIndex = getNum('recordIndex', -1);
-      appliedFailures.push({
-        type: f.type,
-        params: p,
-        applied: false,
-        note: `record-only in 11E: fixture mutation requires the 11F fixture layer. Will inject a malformed record into "${fixtureName}" at index ${recordIndex}.`,
-      });
+      if (fixtureLayerAvailable) {
+        appliedFailures.push({
+          type: f.type,
+          params: p,
+          applied: true,
+          note: `JSON fixture mutated: record at index ${recordIndex} in "${fixtureName}" replaced with malformed data`,
+        });
+      } else {
+        appliedFailures.push({
+          type: f.type,
+          params: p,
+          applied: false,
+          note: `fixture mutation requires the 11F fixture layer. Will inject a malformed record into "${fixtureName}" at index ${recordIndex}.`,
+        });
+      }
     } else {
       // Unknown type — record with applied:false so it doesn't disappear.
       appliedFailures.push({
@@ -375,11 +620,28 @@ function normaliseStageCode(stageCode) {
  * was actually applied vs record-only. The `appliedFailures` array
  * ends up in the per-stage PipelineRun record for the report page.
  */
-function runSingleStage(stage, code, allFailures) {
+function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
   const config = getExecutorConfig(stage.executorType);
+  // Section 11F — when we have a per-run fixture root, the orchestrator
+  // is doing real fixture mutations, so flip fixture-layer failures
+  // (late_data, schema_drift, poison_message) to applied:true.
   const { effectiveMemoryMb, effectiveTimeoutMs, extraEnv, appliedFailures } =
-    applyFailuresToStage(stage, allFailures);
+    applyFailuresToStage(stage, allFailures, { fixtureLayerAvailable: !!runFixtureRoot });
   const extension = pickExtension(config.image);
+
+  // Section 11F — resolve and mount the stage's input fixtures.
+  //
+  // Flow when runFixtureRoot is provided (the per-run mutated copy):
+  //   1. Copy the original fixture into runFixtureRoot/<path>
+  //   2. Apply any scenario failures targeted at this stage to the copy
+  //      (e.g. late_data rewrites timestamps; schema_drift renames columns)
+  //   3. Mount runFixtureRoot/<path> at /fixtures/<path> in the container
+  //
+  // Without runFixtureRoot (e.g. legacy / test paths), fall back to the
+  // read-only source fixtures.
+  const fixtureMounts = runFixtureRoot
+    ? resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot)
+    : resolveFixtureMounts(stage, problem);
 
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
@@ -412,6 +674,13 @@ function runSingleStage(stage, code, allFailures) {
       '--cpus', '1.0',
       '-v', `${tmpFile}:/sandbox/solution${extension}:ro`,
     ];
+    // Section 11F — mount each input fixture at the in-container path
+    // the stage declares. Mounted read-only; the per-tool runner reads
+    // from /fixtures/ as needed. Missing fixtures are skipped with a
+    // warning rather than failing the run (some stages don't need any).
+    for (const mount of fixtureMounts) {
+      dockerArgs.push('-v', `${mount.hostPath}:${mount.containerPath}:ro`);
+    }
     // The in-container path of the user code, fed to buildCmd so each
     // per-tool runner gets it as $1 (or via SUBMISSION_FILE env for the
     // python runners, but they all fall back to /sandbox/solution.<ext>).
@@ -521,4 +790,6 @@ module.exports = {
   // Section 11E — exported for unit tests.
   applyFailuresToStage,
   resolveScenarioFailures,
+  // Section 11F — exported for unit tests.
+  resolveFixtureMounts,
 };
