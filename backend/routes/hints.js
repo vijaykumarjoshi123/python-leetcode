@@ -1,17 +1,25 @@
 /**
  * Hints route — POST /api/hints
  *
- * Spec section 7:
- *   - Body: { problemId, code, executorType, submissionHistory: [...last 3] }
+ * Spec section 7 (single-tool) + Tier 3 / Section 11G (pipeline):
+ *   - Body: { problemId, code, executorType, submissionHistory: [...last 3], isPipeline?: bool }
  *   - JWT auth required
  *   - Anthropic SDK call (Claude, Socratic, executor-aware)
  *   - SSE response (text/event-stream)
  *   - Rate limit: 5 hints/user/problem/day via Redis TTL=86400
+ *
+ * When `isPipeline: true` is passed, the route treats `problemId` as a
+ * PipelineProblem id, fetches recent PipelineRun records instead of
+ * Submission records, and forwards `stageResults[]` to hintsService so
+ * the system prompt can branch on stage-level failures. The existing
+ * 7-tool flow is unchanged — `isPipeline` defaults to false.
  */
 
 const express = require('express');
 const Problem = require('../models/Problem');
 const Submission = require('../models/Submission');
+const PipelineProblem = require('../models/PipelineProblem');
+const PipelineRun = require('../models/PipelineRun');
 const auth = require('../middleware/auth');
 const { isValidExecutorType } = require('../services/executorRouter');
 const { streamHint } = require('../services/hintsService');
@@ -57,7 +65,7 @@ function sseSend(res, payload) {
 }
 
 router.post('/', auth, async (req, res) => {
-  const { problemId, code, executorType, submissionHistory } = req.body || {};
+  const { problemId, code, executorType, submissionHistory, isPipeline } = req.body || {};
   const userId = req.user && req.user.id;
 
   if (!userId) {
@@ -68,8 +76,14 @@ router.post('/', auth, async (req, res) => {
       error: 'problemId (string) and code (string) are required',
     });
   }
-  // executorType is optional — default to 'python' for legacy callers.
-  const resolvedExecutorType = executorType || 'python';
+  // Section 11G — when the caller flags a pipeline problem we route to
+  // PipelineProblem/PipelineRun and force executorType to 'pipeline'.
+  // The single-tool flow (isPipeline falsy) is unchanged: executorType
+  // defaults to 'python' for legacy callers.
+  const resolvedIsPipeline = isPipeline === true;
+  const resolvedExecutorType = resolvedIsPipeline
+    ? 'pipeline'
+    : (executorType || 'python');
   if (!isValidExecutorType(resolvedExecutorType)) {
     return res.status(400).json({
       error: `invalid executorType "${resolvedExecutorType}"`,
@@ -77,8 +91,13 @@ router.post('/', auth, async (req, res) => {
   }
 
   // ---- Rate limit ----
-  // One Redis key per (userId, problemId) pair with TTL=24h.
-  const rlKey = `hints:${userId}:${problemId}`;
+  // Section 11G — pipeline hints use their own key namespace so the
+  // single-tool limit isn't accidentally consumed (the two flows
+  // share the same (userId, problemId) shape but problems live in
+  // different collections, so a separate prefix prevents cross-pollination).
+  const rlKey = resolvedIsPipeline
+    ? `hints:pipe:${userId}:${problemId}`
+    : `hints:${userId}:${problemId}`;
   try {
     const r = redis();
     const count = await r.incr(rlKey);
@@ -104,7 +123,12 @@ router.post('/', auth, async (req, res) => {
   // the client didn't supply it) ----
   let problem;
   try {
-    problem = await Problem.findById(problemId);
+    // Section 11G — pipeline flow loads from PipelineProblem; single-tool
+    // flow still loads from Problem. The two collections are isolated,
+    // so a problemId in one will simply 404 in the other.
+    problem = resolvedIsPipeline
+      ? await PipelineProblem.findById(problemId)
+      : await Problem.findById(problemId);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -117,21 +141,9 @@ router.post('/', auth, async (req, res) => {
   // context.
   let history = Array.isArray(submissionHistory) ? submissionHistory.slice(-3) : null;
   if (!history || history.length === 0) {
-    try {
-      const recent = await Submission.find({ userId, problemId })
-        .sort({ submittedAt: -1 })
-        .limit(3)
-        .select('status runtime error executorType toolVersion submittedAt');
-      history = recent.map((s) => ({
-        status: s.status,
-        runtime: s.runtime,
-        error: s.error,
-        executorType: s.executorType,
-        toolVersion: s.toolVersion,
-      }));
-    } catch {
-      history = [];
-    }
+    history = resolvedIsPipeline
+      ? await loadPipelineHistory(userId, problemId)
+      : await loadSingleToolHistory(userId, problemId);
   }
 
   // ---- SSE response ----
@@ -166,5 +178,73 @@ router.post('/', auth, async (req, res) => {
     res.end();
   }
 });
+
+/**
+ * Section 11G — load the user's last 3 PipelineRun records and shape
+ * them into the same {status, runtime, error, ...} contract that the
+ * single-tool history uses, but with `stageResults[]` attached so the
+ * service can surface a specific failing stage. failures[] on each
+ * stage is serialised back to a plain object (MongoDB Map→Object
+ * already happens on read, but we keep it explicit for clarity).
+ */
+async function loadPipelineHistory(userId, pipelineProblemId) {
+  try {
+    const recent = await PipelineRun.find({ userId, pipelineProblemId })
+      .sort({ submittedAt: -1 })
+      .limit(3)
+      .select('stageResults totalRuntimeMs passed scenarioId submittedAt');
+    return recent.map((r) => ({
+      status: r.passed ? 'passed' : 'failed',
+      runtime: r.totalRuntimeMs,
+      error: '',
+      executorType: 'pipeline',
+      // toolVersion isn't meaningful at the pipeline level — leave empty.
+      toolVersion: '',
+      stageResults: (r.stageResults || []).map((sr) => ({
+        stageId: sr.stageId,
+        executorType: sr.executorType,
+        status: sr.status,
+        error: sr.error || '',
+        // Serialise Mongoose Map params to a plain object so the
+        // service can index by key without going through schema APIs.
+        failures: (sr.failures || []).map((f) => ({
+          type: f.type,
+          applied: f.applied,
+          note: f.note || '',
+          params: f.params instanceof Map
+            ? Object.fromEntries(f.params)
+            : (f.params || {}),
+        })),
+      })),
+      scenarioId: r.scenarioId || '',
+    }));
+  } catch (err) {
+    console.warn('[hints] pipeline history lookup failed:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Existing single-tool history lookup, unchanged from before Section 11G.
+ * Pulled into a named helper so the route handler reads as a straight-
+ * line dispatch.
+ */
+async function loadSingleToolHistory(userId, problemId) {
+  try {
+    const recent = await Submission.find({ userId, problemId })
+      .sort({ submittedAt: -1 })
+      .limit(3)
+      .select('status runtime error executorType toolVersion submittedAt');
+    return recent.map((s) => ({
+      status: s.status,
+      runtime: s.runtime,
+      error: s.error,
+      executorType: s.executorType,
+      toolVersion: s.toolVersion,
+    }));
+  } catch {
+    return [];
+  }
+}
 
 module.exports = router;

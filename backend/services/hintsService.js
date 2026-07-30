@@ -57,12 +57,35 @@ const TOOL_FOCUS = {
     'Partition pruning predicates must reference partition columns',
     'Schema evolution requires a snapshot_id, not a fresh read',
   ],
+  // Tier 3 / Section 11G — pipeline-aware hints. A pipeline submission
+  // is a multi-stage DAG; failures can come from user code, scenario-
+  // injected fixture mutations, or a broken inter-stage contract.
+  // The focus is on diagnosis: WHICH stage failed and WHY, before
+  // trying to fix anything. The `pipeline` executorType isn't a real
+  // single-tool type (it's the 8th entry in EXECUTOR_CONFIG used by
+  // the orchestrator itself); it's surfaced here so the system prompt
+  // can branch when a pipeline history is in play.
+  pipeline: [
+    'Diagnosing which stage failed (topo order, not run order)',
+    'Reading stage-level errors — is it user code, fixture data, or an inter-stage contract?',
+    'Distinguishing scenario-injected failures (late_data, schema_drift, poison_message, oom_on_stage, slow_consumer) from organic bugs',
+    'Time-to-diagnose patterns — what to read first when a downstream stage fails after an upstream change',
+  ],
 };
 
 function buildSystemPrompt(executorType) {
   const toolFocus = (TOOL_FOCUS[executorType] || TOOL_FOCUS.python)
     .map((b, i) => `  ${i + 1}. ${b}`)
     .join('\n');
+
+  // Section 11G — pipeline hints deserve a slightly stronger "diagnose
+  // first, fix second" framing than single-tool hints. The user's code
+  // is a DAG of stages; pointing them at the right stage matters more
+  // than pointing them at the right line.
+  const isPipeline = executorType === 'pipeline';
+  const diagnosisRule = isPipeline
+    ? '- Always identify WHICH stage failed before suggesting any fix; reference the stage by id.'
+    : '';
 
   return `You are a Socratic data-engineering tutor. Your job is to give a SHORT HINT — never the answer.
 
@@ -72,6 +95,7 @@ Rules:
 - If the user is on the right track, point at the next obstacle.
 - If they are stuck, name ONE concrete concept to look up.
 - Use Markdown for code references (backticks around identifiers).
+${diagnosisRule}
 
 Tool focus for this problem (${executorType}):
 ${toolFocus}
@@ -80,6 +104,7 @@ NEVER write the corrected code. NEVER paste the solution. NEVER enumerate the st
 }
 
 function buildUserPrompt({ problem, code, executorType, submissionHistory }) {
+  const isPipeline = executorType === 'pipeline';
   const history = (submissionHistory || [])
     .map((s, i) => {
       const parts = [
@@ -92,6 +117,38 @@ function buildUserPrompt({ problem, code, executorType, submissionHistory }) {
         // Trim error so we don't blow the prompt budget with tracebacks.
         const trimmed = String(s.error).slice(0, 300);
         line += `\n   error: ${trimmed}`;
+      }
+      // Section 11G — for pipeline runs, the submission carries a
+      // stageResults[] (one verdict per stage in topo order). Surface
+      // the FIRST non-passing stage so the tutor can diagnose the
+      // pipeline rather than just summarise the final verdict.
+      if (isPipeline && Array.isArray(s.stageResults) && s.stageResults.length) {
+        const failing = s.stageResults.find((r) =>
+          r && (r.status === 'failed' || r.status === 'error')
+        );
+        if (failing) {
+          line += `\n   failed-stage: ${failing.stageId} (${failing.executorType}) status=${failing.status}`;
+          if (failing.error) {
+            const trimmedStageErr = String(failing.error).slice(0, 300);
+            line += `\n   stage-error: ${trimmedStageErr}`;
+          }
+          // Surface scenario-injected failures targeted at this stage so
+          // the tutor knows whether the failure is organic or synthetic.
+          if (Array.isArray(failing.failures) && failing.failures.length) {
+            const injected = failing.failures
+              .filter((f) => f && f.applied)
+              .map((f) => `${f.type}${f.note ? ` (${f.note})` : ''}`)
+              .join('; ');
+            if (injected) {
+              line += `\n   injected-failures: ${injected}`;
+            }
+          }
+        }
+        // Also surface how many stages ran and how many were skipped —
+        // gives the tutor the run's shape in one line.
+        const passed = s.stageResults.filter((r) => r && r.status === 'passed').length;
+        const skipped = s.stageResults.filter((r) => r && r.status === 'skipped').length;
+        line += `\n   stages: ${passed} passed / ${skipped} skipped / ${s.stageResults.length} total`;
       }
       return line;
     })
@@ -120,8 +177,13 @@ Give ONE short Socratic hint.`;
 function* fallbackHintStream(executorType) {
   const focus = (TOOL_FOCUS[executorType] || [])[0] ||
     'the algorithmic complexity of the hot path';
+  // Section 11G — pipeline fallback points at the diagnosis step
+  // rather than any particular tool, matching the pipeline focus areas.
+  const lead = executorType === 'pipeline'
+    ? `Without an Anthropic API key configured, here's a pipeline hint: `
+    : `Without an Anthropic API key configured, here's a generic hint: `;
   const text =
-    `Without an Anthropic API key configured, here's a generic hint: ` +
+    lead +
     `think about *${focus}* before changing anything else. ` +
     `Set ANTHROPIC_API_KEY to enable real Claude-powered hints.`;
   yield { text };
