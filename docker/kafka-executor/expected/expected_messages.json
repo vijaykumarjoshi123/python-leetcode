@@ -1,0 +1,17 @@
+[
+  {
+    "event_id": "e1",
+    "user_id": 10,
+    "action": "click"
+  },
+  {
+    "event_id": "e2",
+    "user_id": 11,
+    "action": "view"
+  },
+  {
+    "event_id": "e3",
+    "user_id": 12,
+    "action": "purchase"
+  }
+]

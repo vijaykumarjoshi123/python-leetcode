@@ -1,0 +1,6 @@
+[
+  {
+    "table": "events",
+    "file": "events.parquet"
+  }
+]

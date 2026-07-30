@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: orders
+
+models:
+  - name: solution
+    tests:
+      - unique:
+          column_name: date
+      - unique_combination_of_columns:
+          combination_of_columns:
+            - date
+            - product_id
