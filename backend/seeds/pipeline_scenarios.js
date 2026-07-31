@@ -128,4 +128,24 @@ module.exports = [
     ],
     expectedDiagnosis: 'Two root causes — fix the OOM first (lower partitions or increase memoryMbOverride), then handle late data in the enrichment stage (windowing with allowed lateness).',
   },
+
+  // ---------- Section 11K — tutorial scenario ----------
+  // Single-obvious-failure scenario used by the first-visit tutorial
+  // modal. The failure is intentionally easy to diagnose (a 64m
+  // memory limit on a Spark stage that needs at least 256m). The
+  // expectedDiagnosis doubles as the tutorial's "sample diagnosis"
+  // text shown when the user clicks "View sample diagnosis" on the
+  // PipelineProblemPage. The frontend filters this out of the normal
+  // scenario picker dropdown so it doesn't show up alongside the
+  // real scenarios — it's only reachable through the tutorial.
+  {
+    pipelineProblemSlug: 'real-time-clickstream-analytics',
+    slug: 'tutorial',
+    name: 'Tutorial: your first pipeline failure',
+    description: 'A gentle first failure. The Spark enrichment stage is given only 64 MB of memory, which is too tight for the clickstream workload. The fix is one line: bump the stage memoryMbOverride.',
+    failures: [
+      { stageId: 'enrich', type: 'oom_on_stage', params: { memoryMb: 64 } },
+    ],
+    expectedDiagnosis: 'The Spark enrichment stage runs out of memory because the orchestrator gave it only 64 MB. Read the stderr — you will see "java.lang.OutOfMemoryError" or "Container killed by YARN". The fix is either to lower your partition count inside the user code, OR to bump the stage\'s memoryMbOverride on the PipelineProblem schema. For this tutorial the easiest fix is the override.',
+  },
 ];

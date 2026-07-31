@@ -3,6 +3,13 @@ import { useParams, useNavigate, Navigate, Link } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import { pipelinesAPI } from '../services/api';
 import AIHintPanel from '../components/AIHintPanel';
+// Section 11K — first-visit tutorial modal. Imports the component
+// plus the localStorage-gate helpers so we can show it on first load
+// and expose a "Replay tutorial" affordance for returning users.
+import PipelineTutorial, {
+  shouldShowTutorial,
+  resetTutorialGate,
+} from '../components/PipelineTutorial';
 import './PipelineProblemPage.css';
 
 // Default per-stage starter. We seed a comment block so the user knows
@@ -64,6 +71,15 @@ function PipelineProblemPage() {
   const [lastRun, setLastRun] = useState(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(null);
+  // Section 11K — tutorial modal state. Opens automatically on first
+  // visit (gated by localStorage via shouldShowTutorial); can also be
+  // reopened manually via the "Replay tutorial" button on the page.
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  // Sample-diagnosis panel state — when the user clicks "View sample
+  // diagnosis" we expand a card showing the tutorial scenario's
+  // expectedDiagnosis text. Separated from the picker so the user
+  // doesn't see it accidentally; explicit opt-in only.
+  const [showSampleDiagnosis, setShowSampleDiagnosis] = useState(false);
 
   const fetchProblem = useCallback(async () => {
     try {
@@ -107,6 +123,16 @@ function PipelineProblemPage() {
   useEffect(() => {
     if (user?.id) fetchProblem();
   }, [fetchProblem, user?.id]);
+
+  // Section 11K — auto-open the tutorial modal on first visit. We
+  // gate on the localStorage key inside shouldShowTutorial(); existing
+  // users (key set) won't see it. The check fires once per page mount
+  // — re-running fetchProblem doesn't re-trigger the modal.
+  useEffect(() => {
+    if (loading) return; // wait for the problem to load so the modal
+                        // doesn't open over a half-rendered page
+    if (shouldShowTutorial()) setTutorialOpen(true);
+  }, [loading]);
 
   // Build the DAG strip data: one row per stage with its dependsOn
   // edges. Rendered as a left-to-right chain of pills; dependsOn edges
@@ -163,6 +189,15 @@ function PipelineProblemPage() {
 
   return (
     <div className="pipeline-problem-page">
+      {/* Section 11K — first-visit tutorial modal. Rendered outside
+          the page container so the backdrop covers the whole viewport.
+          onClose writes the localStorage gate so the modal won't open
+          again on subsequent visits unless the user clicks
+          "Replay tutorial". */}
+      <PipelineTutorial
+        open={tutorialOpen}
+        onClose={() => setTutorialOpen(false)}
+      />
       <div className="pipeline-page-container">
         {/* Left column: description + DAG + scenario picker */}
         <div className="pipeline-info-panel">
@@ -224,11 +259,19 @@ function PipelineProblemPage() {
               disabled={submitting}
             >
               <option value="">Clean run (no scenario)</option>
-              {scenarios.map((sc) => (
-                <option key={sc.slug} value={sc.slug}>
-                  {sc.name} ({sc.slug})
-                </option>
-              ))}
+              {/* Section 11K — filter the "tutorial" scenario out of the
+                  picker. It's reachable only through the first-visit
+                  tutorial modal (which pre-selects it via the
+                  scenarioId state on close) and the "View sample
+                  diagnosis" affordance below. Showing it alongside
+                  the real scenarios would clutter the picker. */}
+              {scenarios
+                .filter((sc) => sc.slug !== 'tutorial')
+                .map((sc) => (
+                  <option key={sc.slug} value={sc.slug}>
+                    {sc.name} ({sc.slug})
+                  </option>
+                ))}
             </select>
             {scenarioId && (
               <div className="pipeline-scenario-detail">
@@ -247,6 +290,49 @@ function PipelineProblemPage() {
                 })()}
               </div>
             )}
+
+            {/* Section 11K — "View sample diagnosis" affordance. Reads
+                the tutorial scenario's expectedDiagnosis from the
+                scenarios list (filtered out of the picker above). The
+                user has to opt in explicitly — the diagnosis is
+                hidden by default so the exercise isn't trivially
+                spoiled. */}
+            <div className="pipeline-tutorial-actions">
+              <button
+                type="button"
+                className="pipeline-tutorial-link"
+                onClick={() => setShowSampleDiagnosis((v) => !v)}
+              >
+                {showSampleDiagnosis ? 'Hide sample diagnosis' : 'View sample diagnosis'}
+              </button>
+              <button
+                type="button"
+                className="pipeline-tutorial-link pipeline-tutorial-link-muted"
+                onClick={() => {
+                  resetTutorialGate();
+                  setTutorialOpen(true);
+                }}
+              >
+                Replay tutorial
+              </button>
+            </div>
+            {showSampleDiagnosis && (() => {
+              const tutorialSc = scenarios.find((x) => x.slug === 'tutorial');
+              if (!tutorialSc) {
+                return (
+                  <div className="pipeline-sample-diagnosis pipeline-sample-diagnosis-missing">
+                    Tutorial scenario not seeded. Run
+                    <code> node seeds/pipeline_scenarios.js</code> to load it.
+                  </div>
+                );
+              }
+              return (
+                <div className="pipeline-sample-diagnosis">
+                  <h4>Sample diagnosis (tutorial)</h4>
+                  <p>{tutorialSc.expectedDiagnosis}</p>
+                </div>
+              );
+            })()}
           </div>
         </div>
 
