@@ -200,7 +200,11 @@ function runSingleTestCase(code, testCase, index, config) {
         const actual = normalizeResult(actualValue);
         const expected = normalizeResult(testCase.output);
 
-        const passed = typeof parsed.passed === 'boolean' ? parsed.passed : actual === expected;
+        // The runner just runs the code and reports what happened.
+        // It doesn't compare actual vs expected (and historically has
+        // emitted passed:true unconditionally). The comparison is the
+        // worker's job — that's where the expected output lives.
+        const passed = actual === expected;
 
         resolve({
           input: testCase.input,

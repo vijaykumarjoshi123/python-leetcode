@@ -54,6 +54,134 @@ def load_test_case() -> dict | None:
         return None
 
 
+class _InvocationError(Exception):
+    """Wraps a TypeError from a mis-shaped call so we can detect-and-retry."""
+
+
+def _parse_test_input(test_input: str):
+    """Parse the test input string into a Python value the user's solution
+    can consume.
+
+    Heuristics, in order:
+      1. If the string looks like JSON (`[`, `{`, `"`, digits, `null`,
+         `true`, `false`), parse it as JSON.
+      2. If it contains `=` signs (the "nums = [...], target = 9" format
+         from the legacy Leetcode-style seed), split on commas at the top
+         level and evaluate each `name = expr` pair as Python.
+      3. If it contains commas at the top level (positional args
+         "[2,7,11,15], 9"), split and evaluate each piece.
+      4. Fall back to returning the raw string (caller will pass it
+         straight through to the user's function).
+    """
+    s = test_input.strip()
+    if not s:
+        return s
+
+    # 1. JSON-shaped
+    if s[0] in "[{\"\'-0123456789ntf" or s.startswith("null") or s.startswith("true") or s.startswith("false"):
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
+
+    # 2. "name = expr, name = expr"  (legacy Leetcode input format)
+    if "=" in s and "," in s:
+        try:
+            import ast
+            # Split on top-level commas (ignoring commas inside brackets).
+            pieces = []
+            depth = 0
+            buf = []
+            for ch in s:
+                if ch in "[({":
+                    depth += 1
+                elif ch in "])}":
+                    depth -= 1
+                if ch == "," and depth == 0:
+                    pieces.append("".join(buf).strip())
+                    buf = []
+                else:
+                    buf.append(ch)
+            if buf:
+                pieces.append("".join(buf).strip())
+            # Each piece is "name = expr". Drop the name, keep the expr.
+            values = []
+            for piece in pieces:
+                if "=" in piece:
+                    expr = piece.split("=", 1)[1].strip()
+                    values.append(ast.literal_eval(expr))
+                else:
+                    values.append(ast.literal_eval(piece))
+            return values if len(values) > 1 else values[0]
+        except Exception:
+            pass
+
+    # 3. Top-level positional args: "[2,7,11,15], 9"
+    if "," in s:
+        try:
+            import ast
+            depth = 0
+            buf = []
+            pieces = []
+            for ch in s:
+                if ch in "[({":
+                    depth += 1
+                elif ch in "])}":
+                    depth -= 1
+                if ch == "," and depth == 0:
+                    pieces.append("".join(buf).strip())
+                    buf = []
+                else:
+                    buf.append(ch)
+            if buf:
+                pieces.append("".join(buf).strip())
+            values = [ast.literal_eval(p) for p in pieces]
+            return values if len(values) > 1 else values[0]
+        except Exception:
+            pass
+
+    # 4. Fall back to the raw string
+    return s
+
+
+def _invoke_solution(solution_fn, test_input):
+    """Call the user's solution with an input that's likely to match.
+
+    Tries:
+      1. Pass the parsed input as a single positional arg.
+         - If the function takes 1 arg, success.
+         - If the function takes N args and the parsed input is a list
+           of length N, splat it.
+      2. Fall back to passing the raw input string as a single arg.
+
+    Returns either the function's return value, or an _InvocationError
+    if the call raised.
+    """
+    import inspect
+    try:
+        sig = inspect.signature(solution_fn)
+        param_count = len(sig.parameters)
+    except (TypeError, ValueError):
+        param_count = 1
+
+    parsed = _parse_test_input(test_input)
+
+    # If parsed is a list/tuple and the function expects multiple args,
+    # splat.
+    if param_count > 1 and isinstance(parsed, (list, tuple)) and len(parsed) == param_count:
+        try:
+            return solution_fn(*parsed)
+        except Exception as exc:
+            return _InvocationError(f"{type(exc).__name__}: {exc}")
+
+    # Otherwise pass parsed as a single arg. If it's a complex type
+    # (list, dict), pass as-is. If it's still a string, pass that.
+    try:
+        return solution_fn(parsed)
+    except Exception as exc:
+        return _InvocationError(f"{type(exc).__name__}: {exc}")
+
+
 def main() -> int:
     if not os.path.isfile(SUBMISSION_FILE):
         emit({
@@ -100,16 +228,13 @@ def main() -> int:
         # return value as the test result. Otherwise the captured stdout
         # is the result.
         if "solution" in user_globals and callable(user_globals["solution"]):
-            try:
-                # Most leetcode-style problems take the input as a string;
-                # advanced problems parse it themselves.
-                actual = user_globals["solution"](test_input)
-            except Exception as exc:
+            actual = _invoke_solution(user_globals["solution"], test_input)
+            if isinstance(actual, _InvocationError):
                 elapsed_ms = round((time.time() - start) * 1000, 2)
                 emit({
                     "passed": False,
                     "output": captured_output,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": str(actual),
                     "runtime_ms": elapsed_ms,
                 })
                 return 0
