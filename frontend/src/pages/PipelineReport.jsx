@@ -223,6 +223,24 @@ function PipelineReport() {
         </section>
 
         <section className="report-section">
+          <h2>Diagnostics</h2>
+          <p className="section-subtitle">
+            Per-stage observability (Section 11I). Only stages that
+            failed carry diagnostics — clean stages were skipped to keep
+            Mongo writes bounded.
+          </p>
+          {stages.some((s) => s.diagnostics) ? (
+            <DiagnosticsList stages={stages} />
+          ) : (
+            <p className="placeholder-text">
+              No diagnostic data captured for this run. (Clean runs and
+              runs without diagnostics capture enabled don't surface
+              anything here.)
+            </p>
+          )}
+        </section>
+
+        <section className="report-section">
           <h2>Get a hint</h2>
           <p className="section-subtitle">
             Ask the AI tutor for a diagnosis based on this run. The hint
@@ -252,6 +270,226 @@ function PipelineReport() {
 function truncate(str, n) {
   if (!str) return '';
   return str.length <= n ? str : `${str.slice(0, n)}…`;
+}
+
+/**
+ * DiagnosticsList — renders per-stage diagnostics (Section 11I).
+ *
+ * Each failing stage carries a `diagnostics` object whose shape
+ * depends on the executor type:
+ *   - pyspark:   sparkStages[], sparkEventLogTail, oomMarker
+ *   - dbt:       runResults[], tests[], modelTimings[]
+ *   - kafka:     consumerLag, topicStats[]
+ *   - airflow:   taskTimings[], dagId, structuralIssues[]
+ *
+ * Stages without diagnostics (clean stages, or stages where the
+ * orchestrator chose not to persist) are omitted — see
+ * `shouldPersistDiagnostics` in pipelineOrchestrator.js for the
+ * cost-limit policy.
+ */
+function DiagnosticsList({ stages }) {
+  const failing = stages.filter((s) => s && s.diagnostics);
+  if (failing.length === 0) return null;
+
+  return (
+    <div className="diagnostics-list">
+      {failing.map((s) => (
+        <div key={s.stageId} className="diagnostics-stage">
+          <h3 className="diagnostics-stage-header">
+            <code>{s.stageId}</code>
+            <span className="diagnostics-tool">{s.executorType}</span>
+          </h3>
+          {s.executorType === 'pyspark' && <SparkDiagnostics diag={s.diagnostics} />}
+          {s.executorType === 'dbt' && <DbtDiagnostics diag={s.diagnostics} />}
+          {s.executorType === 'kafka' && <KafkaDiagnostics diag={s.diagnostics} />}
+          {s.executorType === 'airflow' && <AirflowDiagnostics diag={s.diagnostics} />}
+          {!['pyspark', 'dbt', 'kafka', 'airflow'].includes(s.executorType) && (
+            <p className="placeholder-text">
+              No diagnostics renderer for {s.executorType} yet.
+            </p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SparkDiagnostics({ diag }) {
+  const stages = diag.sparkStages || [];
+  const tail = diag.sparkEventLogTail || [];
+  return (
+    <div className="diagnostics-body">
+      {diag.oomMarker && (
+        <div className="diagnostics-banner diagnostics-banner-danger">
+          ⚠️ Out-of-memory signature detected in stderr
+          (Container killed by YARN or <code>java.lang.OutOfMemoryError</code>).
+          Reduce partition size or ask for more memory via
+          <code> memoryMbOverride</code>.
+        </div>
+      )}
+      {stages.length > 0 ? (
+        <>
+          <h4>Stage table</h4>
+          <table className="diagnostics-table">
+            <thead>
+              <tr><th>Stage</th><th>Tasks</th><th>Duration</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              {stages.map((stg, idx) => (
+                <tr key={idx}>
+                  <td><code>{stg.stageId}</code></td>
+                  <td>{stg.taskCount}</td>
+                  <td>{stg.durationMs} ms</td>
+                  <td><span className={`pipeline-stage-status status-${stg.status}`}>{stg.status}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <p className="placeholder-text">No Spark stage markers found in stderr.</p>
+      )}
+      {tail.length > 0 && (
+        <>
+          <h4>Event log tail</h4>
+          <pre className="diagnostics-log">{tail.join('\n')}</pre>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DbtDiagnostics({ diag }) {
+  const tests = diag.tests || [];
+  const failingTests = tests.filter((t) => t.status !== 'pass' && t.status !== 'success');
+  const timings = diag.modelTimings || [];
+  return (
+    <div className="diagnostics-body">
+      {tests.length > 0 ? (
+        <>
+          <h4>Tests ({tests.length} — {failingTests.length} failing)</h4>
+          <table className="diagnostics-table">
+            <thead>
+              <tr><th>Test</th><th>Status</th><th>Time</th></tr>
+            </thead>
+            <tbody>
+              {tests.map((t, idx) => (
+                <tr key={idx}>
+                  <td><code>{truncate(t.unique_id, 60)}</code></td>
+                  <td>
+                    <span className={`pipeline-stage-status status-${t.status}`}>{t.status}</span>
+                  </td>
+                  <td>{t.totalTimeMs} ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <p className="placeholder-text">No dbt test results captured.</p>
+      )}
+      {timings.length > 0 && (
+        <>
+          <h4>Model timings</h4>
+          <ul className="diagnostics-list-plain">
+            {timings.map((m, idx) => (
+              <li key={idx}>
+                <code>{truncate(m.unique_id, 60)}</code>
+                {' — '}{m.totalTimeMs} ms
+                <span className={`pipeline-stage-status status-${m.status}`}>{m.status}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+function KafkaDiagnostics({ diag }) {
+  const topicStats = diag.topicStats || [];
+  return (
+    <div className="diagnostics-body">
+      <div className="diagnostics-banner diagnostics-banner-info">
+        Consumer lag at run completion:&nbsp;
+        {diag.consumerLag != null ? (
+          <strong>{diag.consumerLag} messages behind</strong>
+        ) : (
+          <em>0 (or no consumer group)</em>
+        )}
+      </div>
+      {topicStats.length > 0 ? (
+        <>
+          <h4>Topic stats</h4>
+          <table className="diagnostics-table">
+            <thead>
+              <tr><th>Topic</th><th>Partition</th><th>End offset</th><th>Messages</th></tr>
+            </thead>
+            <tbody>
+              {topicStats.map((t, idx) => (
+                <tr key={idx}>
+                  <td><code>{t.topic}</code></td>
+                  <td>{t.partition}</td>
+                  <td>{t.logEndOffset}</td>
+                  <td>{t.messageCount}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : (
+        <p className="placeholder-text">No topic stats captured (broker may have shut down).</p>
+      )}
+    </div>
+  );
+}
+
+function AirflowDiagnostics({ diag }) {
+  const timings = diag.taskTimings || [];
+  const issues = diag.structuralIssues || [];
+  const max = timings.reduce((m, t) => Math.max(m, t.durationMs || 0), 0);
+  return (
+    <div className="diagnostics-body">
+      {diag.dagId && (
+        <div className="diagnostics-banner diagnostics-banner-info">
+          DAG: <code>{diag.dagId}</code>
+        </div>
+      )}
+      {issues.length > 0 && (
+        <div className="diagnostics-banner diagnostics-banner-warning">
+          ⚠️ Structural issues:
+          <ul className="diagnostics-list-plain">
+            {issues.map((iss, idx) => <li key={idx}>{iss}</li>)}
+          </ul>
+        </div>
+      )}
+      {timings.length > 0 ? (
+        <>
+          <h4>Task timings (Gantt-style)</h4>
+          <div className="diagnostics-gantt">
+            {timings.map((t, idx) => {
+              const widthPct = max > 0 ? Math.max(2, ((t.durationMs || 0) / max) * 100) : 100;
+              return (
+                <div key={idx} className="diagnostics-gantt-row">
+                  <code className="diagnostics-gantt-label">{t.taskId}</code>
+                  <div className="diagnostics-gantt-track">
+                    <div
+                      className={`diagnostics-gantt-bar status-${t.status}`}
+                      style={{ width: `${widthPct}%` }}
+                      title={`${t.durationMs} ms`}
+                    />
+                  </div>
+                  <span className="diagnostics-gantt-ms">{t.durationMs} ms</span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        <p className="placeholder-text">No task timings captured.</p>
+      )}
+    </div>
+  );
 }
 
 export default PipelineReport;

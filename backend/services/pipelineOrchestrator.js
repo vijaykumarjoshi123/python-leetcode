@@ -620,6 +620,61 @@ function normaliseStageCode(stageCode) {
  * was actually applied vs record-only. The `appliedFailures` array
  * ends up in the per-stage PipelineRun record for the report page.
  */
+/**
+ * Section 11I — should we request per-tool diagnostics from this stage?
+ *
+ * Cost-limit: the per-tool runners do their diagnostic capture in-
+ * container (regex over stderr for Spark, parse dbt run_results.json,
+ * kafka-consumer-groups.sh for Kafka, instrumented timings for
+ * Airflow). These are cheap individually but can add ~1-2s per stage;
+ * aggregating across a 4-stage pipeline means ~5-8s extra wall-clock
+ * even on a clean run. The plan calls for skipping heavy capture on
+ * clean stages.
+ *
+ * Strategy:
+ *   - PIPELINE_DIAGNOSTICS_MODE=always     → request diagnostics on every
+ *                                            stage (default; matches the
+ *                                            pre-11I behaviour where the
+ *                                            report page could be missing
+ *                                            diagnostics on clean runs)
+ *   - PIPELINE_DIAGNOSTICS_MODE=on-failure → request diagnostics on every
+ *                                            stage at the runner layer
+ *                                            (the runner does the work
+ *                                            unconditionally; the orch-
+ *                                            estator decides whether to
+ *                                            persist based on outcome)
+ *   - PIPELINE_DIAGNOSTICS_MODE=never      → never request
+ *
+ * The persistence-side filter is the real cost-limit: regardless of
+ * whether the runner computed diagnostics, we only attach them to the
+ * stageResult when the stage is failing OR when diagnostics.mode=always.
+ * That keeps Mongo writes bounded — clean stages don't carry the
+ * payload.
+ */
+function getDiagnosticsMode() {
+  const mode = (process.env.PIPELINE_DIAGNOSTICS_MODE || 'always').toLowerCase();
+  if (['always', 'on-failure', 'never'].includes(mode)) return mode;
+  return 'always';
+}
+
+function shouldRequestDiagnostics() {
+  // Whether the runner should compute diagnostics. The orchestrator's
+  // own filter (shouldPersistDiagnostics, below) is the real cost-limit;
+  // we ask the runner to compute whenever the mode is not 'never' so
+  // we have data available if the stage fails.
+  return getDiagnosticsMode() !== 'never';
+}
+
+function shouldPersistDiagnostics(stageStatus) {
+  const mode = getDiagnosticsMode();
+  if (mode === 'never') return false;
+  if (mode === 'always') return true;
+  // on-failure: only persist on failed/error stages. Skipped stages
+  // (downstream of a failing upstream) don't get diagnostics either —
+  // we already know WHY they're skipped (the error says so).
+  return stageStatus === 'failed' || stageStatus === 'error';
+}
+
 function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
   const config = getExecutorConfig(stage.executorType);
   // Section 11F — when we have a per-run fixture root, the orchestrator
@@ -687,9 +742,18 @@ function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
     const inContainerPath = `/sandbox/solution${extension}`;
     dockerArgs.push(config.image, ...config.buildCmd(inContainerPath));
 
+    // Section 11I — opt the runner into diagnostics collection. The
+    // env var is set whenever the mode isn't 'never'; the persistence-
+    // side filter (shouldPersistDiagnostics) is what actually limits
+    // storage cost.
+    const runnerEnv = { ...process.env, PYTHONUNBUFFERED: '1', ...extraEnv };
+    if (shouldRequestDiagnostics()) {
+      runnerEnv.PIPELINE_COLLECT_DIAGNOSTICS = '1';
+    }
+
     const proc = cp.spawn('docker', dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONUNBUFFERED: '1', ...extraEnv },
+      env: runnerEnv,
     });
 
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
@@ -711,15 +775,15 @@ function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
         const cleanedErr = stderr.trim().slice(0, 2000);
         const parsed = tryParseRunnerJson(stdout);
         if (parsed) {
-          resolve({
-            stageId: stage.id,
-            executorType: stage.executorType,
-            status: parsed.passed ? 'passed' : 'failed',
+          const status = parsed.passed ? 'passed' : 'failed';
+          resolve(buildStageResult(stage, {
+            status,
             runtimeMs: parsed.runtime_ms || Math.round(runtimeMs * 100) / 100,
             output: (parsed.output || '').slice(0, 4000),
             error: parsed.error || '',
             failures: appliedFailures,
-          });
+            parsedDiagnostics: parsed.diagnostics,
+          }));
           return;
         }
         resolve(stageResultError(stage, cleanedErr || `Exit code: ${exitCode}`, runtimeMs, appliedFailures));
@@ -736,15 +800,15 @@ function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
         ));
         return;
       }
-      resolve({
-        stageId: stage.id,
-        executorType: stage.executorType,
-        status: parsed.passed ? 'passed' : 'failed',
+      const status = parsed.passed ? 'passed' : 'failed';
+      resolve(buildStageResult(stage, {
+        status,
         runtimeMs: parsed.runtime_ms || Math.round(runtimeMs * 100) / 100,
         output: (parsed.output || '').slice(0, 4000),
         error: parsed.error || '',
         failures: appliedFailures,
-      });
+        parsedDiagnostics: parsed.diagnostics,
+      }));
     });
 
     proc.on('error', (err) => {
@@ -781,7 +845,38 @@ function stageResultError(stage, error, runtimeMs, appliedFailures) {
     output: '',
     error: String(error || '').slice(0, 4000),
     failures: appliedFailures || [],
+    // Section 11I — error-stage diagnostics default to undefined so
+    // the schema doesn't carry an empty `{}` for orchestrator-level
+    // failures (which never produce per-tool diagnostics anyway).
+    diagnostics: undefined,
   };
+}
+
+/**
+ * Section 11I — build a stageResult from a parsed runner JSON. Applies
+ * the diagnostics persistence filter: clean stages don't carry the
+ * payload (cost-limit), but failed stages do so the report page can
+ * surface why.
+ */
+function buildStageResult(stage, opts) {
+  const result = {
+    stageId: stage.id,
+    executorType: stage.executorType,
+    status: opts.status,
+    runtimeMs: opts.runtimeMs,
+    output: opts.output,
+    error: opts.error,
+    failures: opts.failures || [],
+  };
+  // Cost-limit: persist diagnostics only when the persistence filter
+  // says so. Clean stages get `diagnostics: undefined` which Mongoose
+  // drops entirely (Mixed with default undefined).
+  if (opts.parsedDiagnostics && shouldPersistDiagnostics(opts.status)) {
+    result.diagnostics = opts.parsedDiagnostics;
+  } else {
+    result.diagnostics = undefined;
+  }
+  return result;
 }
 
 module.exports = {
@@ -790,6 +885,9 @@ module.exports = {
   // Section 11E — exported for unit tests.
   applyFailuresToStage,
   resolveScenarioFailures,
+  // Section 11I — exported for unit tests.
+  shouldPersistDiagnostics,
+  getDiagnosticsMode,
   // Section 11F — exported for unit tests.
   resolveFixtureMounts,
 };

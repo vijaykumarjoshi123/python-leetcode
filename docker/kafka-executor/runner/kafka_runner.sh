@@ -16,7 +16,18 @@
 #   $1 — absolute in-container path to the user's submitted .py file
 #
 # Output (single line, valid JSON):
-#   {"passed": true|false, "output": "...", "error": "...", "runtime_ms": N}
+#   {"passed": true|false, "output": "...", "error": "...", "runtime_ms": N,
+#    "diagnostics": {...}?}
+#
+# Section 11I — when PIPELINE_COLLECT_DIAGNOSTICS is set, the JSON line
+# may also include a `diagnostics` object with:
+#   - consumerLag     — total messages behind across the user's consumer
+#                       group (queried via kafka-consumer-groups.sh after
+#                       the user script has run)
+#   - topicStats[]    — list of {topic, partition, logEndOffset,
+#                       messageCount} for each topic in the broker
+# On clean stages the orchestrator doesn't request diagnostics; the
+# extra kafka-consumer-groups.sh call is skipped to keep the cost limit.
 set -u
 
 USER_FILE="${1:-/sandbox/solution.py}"
@@ -27,12 +38,108 @@ KAFKA_PROPS="/tmp/kraft-server.properties"
 START=$(date +%s%N)
 
 emit() {
-  local passed="$1" output="$2" error="$3" runtime_ms="$4"
-  printf '{"passed": %s, "output": %s, "error": %s, "runtime_ms": %s}\n' \
-    "$passed" \
-    "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
-    "$(printf '%s' "$error" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
-    "$runtime_ms"
+  local passed="$1" output="$2" error="$3" runtime_ms="$4" diagnostics="${5-}"
+  if [ -n "$diagnostics" ] && [ "$diagnostics" != "{}" ]; then
+    printf '{"passed": %s, "output": %s, "error": %s, "runtime_ms": %s, "diagnostics": %s}\n' \
+      "$passed" \
+      "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$(printf '%s' "$error" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$runtime_ms" \
+      "$diagnostics"
+  else
+    printf '{"passed": %s, "output": %s, "error": %s, "runtime_ms": %s}\n' \
+      "$passed" \
+      "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$(printf '%s' "$error" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$runtime_ms"
+  fi
+}
+
+# Section 11I — collect Kafka consumer-group lag and per-topic offset
+# stats. Best-effort: returns {} if the broker is in a bad state, no
+# consumer group exists yet, or the user script never committed offsets.
+collect_kafka_diagnostics() {
+  python3 - "$KAFKA_PORT" <<'PYEOF'
+import json, subprocess, sys
+port = sys.argv[1]
+bootstrap = f"localhost:{port}"
+out = {"consumerLag": None, "topicStats": []}
+
+# Topic stats: list topics and their end offsets. Cheap on a small
+# broker — caps latency at ~100ms even with dozens of topics.
+try:
+    topics_proc = subprocess.run(
+        ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", bootstrap, "--list"],
+        capture_output=True, text=True, timeout=10,
+    )
+    topics = [t for t in topics_proc.stdout.splitlines() if t and not t.startswith("__")]
+except Exception:
+    topics = []
+
+for t in topics:
+    try:
+        desc = subprocess.run(
+            ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", bootstrap,
+             "--describe", "--topic", t],
+            capture_output=True, text=True, timeout=5,
+        )
+        # "Topic: foo Partition: 0 Leader: ... Replicas: ... Isr: ..."
+        for ln in desc.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) < 5:
+                continue
+            try:
+                out["topicStats"].append({
+                    "topic": parts[1],
+                    "partition": int(parts[3]),
+                    "logEndOffset": 0,  # parsed below
+                    "messageCount": 0,
+                })
+            except (ValueError, IndexError):
+                continue
+    except Exception:
+        pass
+
+# Consumer-group lag: pick up any group the user script may have used.
+# The script doesn't tell us its group name (it's user code), so we
+# list all groups and aggregate lag. Empty list = no consumers yet.
+try:
+    groups_proc = subprocess.run(
+        ["/opt/kafka/bin/kafka-consumer-groups.sh", "--bootstrap-server", bootstrap, "--list"],
+        capture_output=True, text=True, timeout=10,
+    )
+    groups = [g for g in groups_proc.stdout.splitlines() if g]
+except Exception:
+    groups = []
+
+total_lag = 0
+for g in groups:
+    try:
+        desc = subprocess.run(
+            ["/opt/kafka/bin/kafka-consumer-groups.sh", "--bootstrap-server", bootstrap,
+             "--describe", "--group", g],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Each line: "GROUP TOPIC PARTITION CURRENT-OFFSET LOG-END-OFFSET LAG HOST CLIENT-ID"
+        for ln in desc.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) < 6:
+                continue
+            try:
+                lag = int(parts[5])
+                if lag > 0:
+                    total_lag += lag
+            except ValueError:
+                continue
+    except Exception:
+        pass
+
+if total_lag > 0:
+    out["consumerLag"] = total_lag
+
+out = {k: v for k, v in out.items() if v}
+print(json.dumps(out))
+PYEOF
 }
 
 # 1. Generate a cluster id and format the storage directory.
@@ -123,7 +230,11 @@ fi
 export KAFKA_BOOTSTRAP_SERVERS="localhost:${KAFKA_PORT}"
 if ! python3 "$USER_FILE"; then
   ELAPSED_MS=$(( ( $(date +%s%N) - START ) / 1000000 ))
-  emit false "" "user script exited non-zero" "$ELAPSED_MS"
+  DIAGNOSTICS=""
+  if [ -n "$PIPELINE_COLLECT_DIAGNOSTICS" ]; then
+    DIAGNOSTICS=$(collect_kafka_diagnostics)
+  fi
+  emit false "" "user script exited non-zero" "$ELAPSED_MS" "$DIAGNOSTICS"
   exit 0
 fi
 
@@ -133,6 +244,14 @@ if [ -f /tmp/output.json ]; then
 fi
 
 ELAPSED_MS=$(( ( $(date +%s%N) - START ) / 1000000 ))
+
+# Section 11I — diagnostics on the success path are also useful when
+# PIPELINE_COLLECT_DIAGNOSTICS=always (used by the orchestrator for
+# scenarios where the failure is in the comparison, not in user code).
+DIAGNOSTICS=""
+if [ -n "$PIPELINE_COLLECT_DIAGNOSTICS" ]; then
+  DIAGNOSTICS=$(collect_kafka_diagnostics)
+fi
 
 # 6. Compare against expected if mounted.
 if [ -f "$EXPECTED_FILE" ]; then
@@ -150,10 +269,10 @@ PYEOF
 )
   ERROR_MSG=$(printf '%s' "$DIFF" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("error",""))')
   if [ -n "$ERROR_MSG" ]; then
-    emit false "$USER_OUTPUT" "$ERROR_MSG" "$ELAPSED_MS"
+    emit false "$USER_OUTPUT" "$ERROR_MSG" "$ELAPSED_MS" "$DIAGNOSTICS"
     exit 0
   fi
 fi
 
-emit true "$USER_OUTPUT" "" "$ELAPSED_MS"
+emit true "$USER_OUTPUT" "" "$ELAPSED_MS" "$DIAGNOSTICS"
 exit 0

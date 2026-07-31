@@ -225,3 +225,177 @@
   color: #888;
   font-size: 1rem;
 }
+
+/* Section 11I — diagnostics rendering. */
+.diagnostics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.diagnostics-stage {
+  border: 1px solid #eef2f7;
+  border-radius: 10px;
+  padding: 16px 18px;
+  background: #f8f9fb;
+}
+
+.diagnostics-stage-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0 0 12px;
+  font-size: 1rem;
+}
+
+.diagnostics-tool {
+  background: #eef2ff;
+  color: #4338ca;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: lowercase;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.diagnostics-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.diagnostics-body h4 {
+  margin: 4px 0 4px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #888;
+}
+
+.diagnostics-banner {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.diagnostics-banner code {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.85rem;
+}
+
+.diagnostics-banner-info {
+  background: #e6f7ff;
+  border: 1px solid #91d5ff;
+  color: #0050b3;
+}
+
+.diagnostics-banner-warning {
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  color: #ad6800;
+}
+
+.diagnostics-banner-danger {
+  background: #fff1f0;
+  border: 1px solid #ffa39e;
+  color: #a8071a;
+}
+
+.diagnostics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.diagnostics-table th,
+.diagnostics-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.diagnostics-table thead {
+  background: white;
+  color: #666;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.diagnostics-log {
+  background: #1f2937;
+  color: #f3f4f6;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.diagnostics-list-plain {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.85rem;
+  color: #333;
+}
+
+.diagnostics-list-plain li {
+  margin-bottom: 4px;
+}
+
+/* Gantt-style task timings (Airflow) */
+.diagnostics-gantt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diagnostics-gantt-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 200px) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+}
+
+.diagnostics-gantt-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-gantt-track {
+  background: #eef2f7;
+  border-radius: 4px;
+  height: 14px;
+  overflow: hidden;
+}
+
+.diagnostics-gantt-bar {
+  height: 100%;
+  border-radius: 4px;
+}
+
+.diagnostics-gantt-bar.status-success {
+  background: #52c41a;
+}
+
+.diagnostics-gantt-bar.status-failed {
+  background: #f5222d;
+}
+
+.diagnostics-gantt-ms {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  color: #555;
+  min-width: 60px;
+  text-align: right;
+}

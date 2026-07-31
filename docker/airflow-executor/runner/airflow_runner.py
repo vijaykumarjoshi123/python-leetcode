@@ -15,7 +15,19 @@ run the full Airflow scheduler (too heavy for sandboxing). Instead:
   5. Write a JSON result line to stdout
 
 Output (single line, valid JSON):
-    {"passed": true|false, "output": "...", "error": "...", "runtime_ms": N}
+    {"passed": true|false, "output": "...", "error": "...", "runtime_ms": N,
+     "diagnostics": {...}?}
+
+Section 11I — when PIPELINE_COLLECT_DIAGNOSTICS is set, the JSON line
+also includes a `diagnostics` object with:
+  - taskTimings[]    — list of {taskId, durationMs, status} for every
+                       PythonOperator task that was actually executed
+                       (not the static DAG.tasks list — only the ones
+                       we ran)
+  - dagId            — echoes the DAG id (cheap; useful for the report)
+  - structuralIssues — the validator's findings, surfaced as a string
+                       list so the report page can render the same
+                       warnings the runner reported
 """
 
 import importlib.util
@@ -162,6 +174,12 @@ def run_python_tasks(dag) -> list[str]:
 
     errors: list[str] = []
     xcom_store: dict = {}
+    # Section 11I — per-task timings captured here, surfaced as the
+    # `diagnostics.taskTimings[]` field on the result JSON when the
+    # orchestrator requests diagnostics. We accumulate all timings
+    # regardless of pass/fail so the report page can show a Gantt-
+    # like timeline of where the user spent time.
+    timings: list[dict] = []
 
     # Pre-seed ts and other context fields. execution_date is mocked because
     # we don't have a real scheduler assigning one.
@@ -180,8 +198,11 @@ def run_python_tasks(dag) -> list[str]:
             "execution_date": execution_date,
             "params": {},
         }
+        start = time.time()
         try:
             task.python_callable(*task.op_args, **task.op_kwargs, **mock_context)
+            duration_ms = int((time.time() - start) * 1000)
+            timings.append({"taskId": task.task_id, "durationMs": duration_ms, "status": "success"})
         except TypeError as e:
             # Airflow 1.x-style callables that take no kwargs (no **context)
             # will fail here. Retry without the mock context — the bug list
@@ -190,13 +211,25 @@ def run_python_tasks(dag) -> list[str]:
             if "missing" in str(e) or "unexpected keyword" in str(e):
                 try:
                     task.python_callable(*task.op_args, **task.op_kwargs)
+                    duration_ms = int((time.time() - start) * 1000)
+                    timings.append({"taskId": task.task_id, "durationMs": duration_ms, "status": "success"})
                 except Exception as e2:
+                    duration_ms = int((time.time() - start) * 1000)
+                    timings.append({"taskId": task.task_id, "durationMs": duration_ms, "status": "failed"})
                     errors.append(f"task {task.task_id!r}: {type(e2).__name__}: {e2}")
             else:
+                duration_ms = int((time.time() - start) * 1000)
+                timings.append({"taskId": task.task_id, "durationMs": duration_ms, "status": "failed"})
                 errors.append(f"task {task.task_id!r}: {type(e).__name__}: {e}")
         except Exception as e:
+            duration_ms = int((time.time() - start) * 1000)
+            timings.append({"taskId": task.task_id, "durationMs": duration_ms, "status": "failed"})
             errors.append(f"task {task.task_id!r}: {type(e).__name__}: {e}")
-    return errors
+    # Return timings alongside errors so main() can attach them to the
+    # result JSON. (Returning a tuple instead of a list keeps the
+    # signature backward-compatible-ish — main() unpacks via
+    # `task_errors, task_timings = run_python_tasks(dag)`.)
+    return errors, timings
 
 
 def main() -> int:
@@ -211,23 +244,49 @@ def main() -> int:
         structural_issues = validate_structure(dag)
         if structural_issues:
             elapsed = round((time.time() - start) * 1000, 2)
-            emit({
+            # Section 11I — surface structural issues as diagnostics so
+            # the report page can render them as warnings (without the
+            # diagnostics gate they're hidden in the error string).
+            diagnostics = None
+            if os.environ.get("PIPELINE_COLLECT_DIAGNOSTICS"):
+                diagnostics = {
+                    "taskTimings": [],
+                    "dagId": getattr(dag, "dag_id", ""),
+                    "structuralIssues": structural_issues,
+                }
+            result = {
                 "passed": False,
                 "output": "",
                 "error": "DAG structure issues: " + "; ".join(structural_issues),
                 "runtime_ms": elapsed,
-            })
+            }
+            if diagnostics is not None:
+                result["diagnostics"] = diagnostics
+            emit(result)
             return 0
 
-        task_errors = run_python_tasks(dag)
+        # Section 11I — run_python_tasks now returns (errors, timings).
+        # We always capture timings so the cost-limit only applies to
+        # the JSON wire payload (timings is in-memory, ~10ms overhead).
+        task_errors, task_timings = run_python_tasks(dag)
         elapsed = round((time.time() - start) * 1000, 2)
         if task_errors:
-            emit({
+            diagnostics = None
+            if os.environ.get("PIPELINE_COLLECT_DIAGNOSTICS"):
+                diagnostics = {
+                    "taskTimings": task_timings,
+                    "dagId": getattr(dag, "dag_id", ""),
+                    "structuralIssues": [],
+                }
+            result = {
                 "passed": False,
                 "output": "",
                 "error": "task execution failed: " + "; ".join(task_errors[:5]),
                 "runtime_ms": elapsed,
-            })
+            }
+            if diagnostics is not None:
+                result["diagnostics"] = diagnostics
+            emit(result)
             return 0
 
         summary = {
@@ -235,12 +294,22 @@ def main() -> int:
             "task_count": len(dag.tasks),
             "schedule": str(dag.schedule_interval),
         }
-        emit({
+        diagnostics = None
+        if os.environ.get("PIPELINE_COLLECT_DIAGNOSTICS"):
+            diagnostics = {
+                "taskTimings": task_timings,
+                "dagId": getattr(dag, "dag_id", ""),
+                "structuralIssues": [],
+            }
+        result = {
             "passed": True,
             "output": json.dumps(summary),
             "error": "",
             "runtime_ms": elapsed,
-        })
+        }
+        if diagnostics is not None:
+            result["diagnostics"] = diagnostics
+        emit(result)
         return 0
     except Exception as e:
         elapsed = round((time.time() - start) * 1000, 2)

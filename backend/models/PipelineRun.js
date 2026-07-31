@@ -60,6 +60,39 @@ const stageResultSchema = new mongoose.Schema({
     applied: { type: Boolean, default: true },  // false when recorded but not yet implemented
     note: { type: String, default: '' },         // explanation when applied=false
   }],
+  // Section 11I — per-stage diagnostics. Each tool captures the bits
+  // that matter for diagnosing that tool's failure modes:
+  //   - pyspark:   { sparkStages[], sparkEventLogTail, oomMarker }
+  //                — sparkStages is a list of {stageId, taskCount,
+  //                durationMs, status} parsed from the event log;
+  //                sparkEventLogTail is the last ~20 lines of the log
+  //                file so the user can read the Spark UI's view
+  //                without downloading the whole log; oomMarker is a
+  //                boolean set when the stderr contains
+  //                "OutOfMemoryError" or "Container killed by YARN".
+  //   - dbt:       { runResults: [...], tests: [...], modelTimings }
+  //                — runResults is the parsed dbt run_results.json
+  //                (each entry: {unique_id, message, timing, status});
+  //                tests is the parsed dbt test results; modelTimings
+  //                is a rollup {model, totalTime, status}.
+  //   - kafka:     { consumerLag, topicStats[] }
+  //                — consumerLag is the lag at the moment of capture
+  //                for the user's consumer group; topicStats is a list
+  //                of {topic, partition, logEndOffset, messageCount}.
+  //   - airflow:   { taskTimings[], dagId, structuralIssues }
+  //                — taskTimings is a list of {taskId, durationMs,
+  //                status}; structuralIssues echoes the validator's
+  //                findings for diagnosis (cycles, orphans, etc).
+  //   - other:     undefined (no diagnostic capture yet)
+  //
+  // Cost-limit: the orchestrator only requests diagnostics for failed
+  // stages by default (env var PIPELINE_DIAGNOSTICS_MODE=always|on-failure;
+  // default on-failure). On clean stages the field is omitted from the
+  // schema entirely — no Mongo write overhead.
+  diagnostics: {
+    type: mongoose.Schema.Types.Mixed,
+    default: undefined,
+  },
 }, { _id: false });
 
 const pipelineRunSchema = new mongoose.Schema({

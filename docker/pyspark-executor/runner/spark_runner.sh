@@ -14,7 +14,22 @@
 #     parquet diff and writes a single JSON line to stdout
 #
 # Output (single line, valid JSON):
-#   {"passed": true|false, "output": "...", "error": "...", "runtime_ms": N}
+#   {"passed": true|false, "output": "...", "error": "...", "runtime_ms": N,
+#    "diagnostics": {...}?}
+#
+# Section 11I — when PIPELINE_COLLECT_DIAGNOSTICS is set (orchestrator
+# does this on failure by default), the JSON line may also include a
+# `diagnostics` object with:
+#   - sparkStages[]  — list of {stageId, taskCount, durationMs, status}
+#                      parsed from the Spark stderr (Spark logs stage
+#                      boundaries to stderr in local mode)
+#   - sparkEventLogTail — last 20 lines of stderr that mention Spark
+#                          events (e.g. "Job ... finished")
+#   - oomMarker      — true if stderr contains an OOM signature
+#                      (OutOfMemoryError, Container killed by YARN)
+# On clean stages the orchestrator doesn't request diagnostics, so the
+# extra stderr parsing is skipped — keeps the cost-limit from the
+# plan ("skip heavy capture on clean stages").
 #
 # PySpark startup adds ~8-15s; the router's per-executor timeout (60s) is
 # what bounds the run wall-clock here. SIGKILL at timeout means we lose
@@ -28,12 +43,89 @@ EXPECTED_DIR="/expected"
 START=$(date +%s%N)
 
 emit() {
-  local passed="$1" output="$2" error="$3" runtime_ms="$4"
-  printf '{"passed": %s, "output": %s, "error": %s, "runtime_ms": %s}\n' \
-    "$passed" \
-    "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
-    "$(printf '%s' "$error" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
-    "$runtime_ms"
+  local passed="$1" output="$2" error="$3" runtime_ms="$4" diagnostics="${5-}"
+  if [ -n "$diagnostics" ] && [ "$diagnostics" != "{}" ]; then
+    printf '{"passed": %s, "output": %s, "error": %s, "runtime_ms": %s, "diagnostics": %s}\n' \
+      "$passed" \
+      "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$(printf '%s' "$error" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$runtime_ms" \
+      "$diagnostics"
+  else
+    printf '{"passed": %s, "output": %s, "error": %s, "runtime_ms": %s}\n' \
+      "$passed" \
+      "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$(printf '%s' "$error" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" \
+      "$runtime_ms"
+  fi
+}
+
+# Section 11I — collect Spark stage diagnostics from stderr. The Spark
+# driver writes "[Stage N: ... finished in T s]" / "Job X finished"
+# lines that we can mine. Returns a JSON object (empty {} when no
+# meaningful signal is found). Reads the captured stderr path from $1.
+collect_spark_diagnostics() {
+  local stderr_file="$1"
+  python3 - "$stderr_file" <<'PYEOF'
+import json, re, sys, os
+
+path = sys.argv[1]
+if not os.path.isfile(path):
+    print(json.dumps({}))
+    sys.exit(0)
+try:
+    with open(path, 'r', errors='replace') as f:
+        lines = f.readlines()
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+# Spark stage markers in stderr (local mode):
+#   "Stage 1 (some op) finished in 0.123 s (prev stage ..., 8 tasks)"
+#   "Job 0 finished: ..."  (older Spark)
+#   "Job 0.0 finished: ..."
+# Capture as much as we can find; cap at the last 20 stage lines to
+# keep the payload bounded.
+stage_re = re.compile(
+    r"Stage\s+(\d+).*?finished in ([\d.]+) s.*?\(.*?(\d+)\s+tasks\)",
+    re.IGNORECASE,
+)
+job_re = re.compile(r"Job\s+([\d.]+)\s+finished", re.IGNORECASE)
+
+stages = []
+tail = []
+for ln in lines[-200:]:
+    m = stage_re.search(ln)
+    if m:
+        try:
+            dur_ms = int(float(m.group(2)) * 1000)
+        except Exception:
+            dur_ms = 0
+        stages.append({
+            "stageId": f"Stage {m.group(1)}",
+            "taskCount": int(m.group(3)),
+            "durationMs": dur_ms,
+            "status": "completed",
+        })
+    if job_re.search(ln):
+        tail.append(ln.rstrip())
+
+oom_marker = any(
+    ("OutOfMemoryError" in ln) or
+    ("Container killed by YARN" in ln) or
+    ("java.lang.OutOfMemoryError" in ln)
+    for ln in lines
+)
+
+out = {
+    "sparkStages": stages[-20:],
+    "sparkEventLogTail": tail[-20:],
+    "oomMarker": oom_marker,
+}
+# Drop empty fields so the payload stays tight.
+out = {k: v for k, v in out.items() if v or isinstance(v, bool)}
+print(json.dumps(out))
+PYEOF
 }
 
 mkdir -p "$OUTPUT_DIR"
@@ -51,19 +143,27 @@ chmod 644 "$SOLUTION_FILE"
 # `error`. The runner returns exit code 0 even on test failure so the
 # JSON contract is preserved.
 SPARK_STDOUT=$(mktemp)
-SPARK_STderr=$(mktemp)
+SPARK_STDERR=$(mktemp)
 spark-submit \
   --master 'local[2]' \
   --driver-memory 512m \
   --conf spark.sql.shuffle.partitions=4 \
   "$SOLUTION_FILE" \
-  >"$SPARK_STDOUT" 2>"$SPARK_STderr"
+  >"$SPARK_STDOUT" 2>"$SPARK_STDERR"
 SPARK_EXIT=$?
 ELAPSED_MS=$(( ( $(date +%s%N) - START ) / 1000000 ))
 
+# Section 11I — collect diagnostics on failure (or whenever the env
+# var says so). collect_spark_diagnostics is cheap (regex over a
+# bounded line range) so the cost-limit is honored.
+DIAGNOSTICS=""
+if [ -n "$PIPELINE_COLLECT_DIAGNOSTICS" ]; then
+  DIAGNOSTICS=$(collect_spark_diagnostics "$SPARK_STDERR")
+fi
+
 if [ "$SPARK_EXIT" -ne 0 ]; then
-  ERROR_MSG=$(head -c 4000 "$SPARK_STderr")
-  emit false "" "spark-submit failed (exit=$SPARK_EXIT): $ERROR_MSG" "$ELAPSED_MS"
+  ERROR_MSG=$(head -c 4000 "$SPARK_STDERR")
+  emit false "" "spark-submit failed (exit=$SPARK_EXIT): $ERROR_MSG" "$ELAPSED_MS" "$DIAGNOSTICS"
   exit 0
 fi
 
@@ -117,9 +217,19 @@ PYEOF
 USER_OUTPUT=$(head -c 4000 "$SPARK_STDOUT")
 ERROR_MSG=$(printf '%s' "$DIFF" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("error",""))')
 
+# Section 11I — for the diff path, diagnostics are useful when the
+# stage is failing OR when explicitly requested. We always recompute
+# the DIAGNOSTICS variable here in case PIPELINE_COLLECT_DIAGNOSTICS
+# was set after the early-emit branch; bash var scoping makes this
+# cheap.
+DIAGNOSTICS=""
+if [ -n "$PIPELINE_COLLECT_DIAGNOSTICS" ]; then
+  DIAGNOSTICS=$(collect_spark_diagnostics "$SPARK_STDERR")
+fi
+
 if [ -n "$ERROR_MSG" ]; then
-  emit false "$USER_OUTPUT" "$ERROR_MSG" "$ELAPSED_MS"
+  emit false "$USER_OUTPUT" "$ERROR_MSG" "$ELAPSED_MS" "$DIAGNOSTICS"
 else
-  emit true "$USER_OUTPUT" "" "$ELAPSED_MS"
+  emit true "$USER_OUTPUT" "" "$ELAPSED_MS" "$DIAGNOSTICS"
 fi
 exit 0
