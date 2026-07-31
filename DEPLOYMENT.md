@@ -354,6 +354,115 @@ Single-host is fine for ~100 concurrent users. Beyond that:
   you ever split executors onto a separate host, the [pythonExecutor.js](backend/services/pythonExecutor.js)
   `spawn('docker', ...)` becomes an SSH call instead.
 
+## Pipeline simulator (Tier 3)
+
+The pipeline simulator (Sections 11A–11K) adds an 8th executor type
+(`pipeline`) and one extra Docker image (`pipeline-runner`). Everything
+else is unchanged.
+
+### What ships new
+
+- `docker/pipeline-runner/Dockerfile` — python:3.11-slim + duckdb/
+  pandas/pyarrow for the final per-stage comparison. Non-root sandbox
+  user.
+- `docker/pipeline-runner/runner/pipeline_runner.{sh,py}` — bash wrapper
+  + Python comparison script. Reads `PIPELINE_SPEC` JSON describing each
+  stage's actual output path + expected output path, runs DuckDB diffs
+  in parallel, emits a single JSON verdict line.
+- `docker-compose.yml` + `docker-compose.prod.yml` — `pipeline-runner`
+  is added under `profiles: ["build"]` (off by default in prod so the
+  larger image doesn't bloat every CI run).
+
+### Enabling the feature
+
+The pipeline simulator is **opt-in per user**:
+
+1. Set `pipelineEnabled: true` on the user document:
+   ```bash
+   docker-compose -f docker-compose.yml -f docker-compose.prod.yml exec -T backend \
+     node -e 'require("./models/User").findByIdAndUpdate(process.argv[1], {pipelineEnabled: true})' <userId>
+   ```
+2. Seed the sample problem + scenarios (one-time):
+   ```bash
+   docker-compose -f docker-compose.yml -f docker-compose.prod.yml exec -T backend \
+     node seeds/pipeline_problems.js
+   docker-compose -f docker-compose.yml -f docker-compose.prod.yml exec -T backend \
+     node seeds/pipeline_scenarios.js
+   ```
+   The first script creates the clickstream pipeline problem; the
+   second attaches 9 scenarios (oom, late_data, schema_drift,
+   poison_message, slow_consumer, composite, tutorial) and the
+   tutorial scenario used by the first-visit modal.
+3. Build the fixture tree (host-side, not in the backend container):
+   ```bash
+   cd docker/pipeline-runner/fixtures/real-time-clickstream-analytics
+   python3 ../../../backend/seeds/generate_clickstream_fixtures.py
+   ```
+   This creates the 10-row MVP parquet fixtures (~36 KB total) used by
+   the per-stage runs.
+
+### Runtime knobs
+
+- `MAX_CONCURRENT_EXECUTIONS` — already gates per-tool submissions.
+  Section 11D's concurrency guard (`runWithGuard`) wraps the entire
+  pipeline run under one permit, so a single pipeline takes one slot
+  even though it spawns multiple containers. Default 5 means at most
+  5 concurrent pipeline runs.
+- `PIPELINE_FIXTURES_ROOT` — host path to the source fixtures tree.
+  Default `<repo>/docker/pipeline-runner/fixtures`. Override to point
+  at a shared network mount or a faster scratch dir.
+- `PIPELINE_FIXTURES_TMP` — where per-run mutated copies live. Default
+  `os.tmpdir()`. The OS reclaims `/tmp` on reboot.
+- `PIPELINE_DIAGNOSTICS_MODE` — `always` (default), `on-failure`, or
+  `never`. Controls the persistence-side cost-limit for the
+  observability surface (Section 11I). In dev `always` is fine; in prod
+  `on-failure` keeps Mongo writes bounded on clean runs.
+
+### Resource budget
+
+The clickstream pipeline runs all four stages in sequence. Wall-clock
+on a small host (4 vCPU, 8 GB RAM):
+
+  - kafka  (KRaft boot):    ~25 s
+  - pyspark (spark-submit): ~15 s
+  - iceberg (PyIceberg):     ~10 s
+  - dbt (duckdb adapter):    ~10 s
+  - pipeline-runner diff:    ~3 s
+  - total:                  ~60-90 s
+
+A pipeline holds one concurrency permit for the full duration. If you
+have many users running pipelines simultaneously, raise
+`MAX_CONCURRENT_EXECUTIONS` and `MAX_QUEUE_SIZE` proportionally, plus
+add RAM (each stage container reserves 512 MB–1 GB depending on
+executor type; see `backend/services/executorRouter.js`).
+
+### Production checklist
+
+- [ ] `pipeline-runner` image is built once and tagged (not rebuilt per
+      run). Push to your registry:
+      ```bash
+      docker build -t your-registry.example.com/pipeline-runner:latest docker/pipeline-runner/
+      docker push your-registry.example.com/pipeline-runner:latest
+      ```
+- [ ] `docker-compose.prod.yml` references the registry tag, not
+      `build: docker/pipeline-runner`.
+- [ ] Fixture tree is read-only at deploy time. The orchestrator copies
+      fixtures into `PIPELINE_FIXTURES_TMP` for each run; the source
+      tree must not be mutable from inside containers.
+- [ ] Backend log volume has a rotation policy. The
+      `apply_fixture_mutation.py` helper logs each mutation at INFO;
+      a busy pipeline week produces ~50 KB of logs per run.
+
+### What stays the same
+
+- The 7-tool flow (python/sql/pyspark/dbt/airflow/kafka/iceberg) is
+  untouched. Existing submissions keep working without any change.
+- `/api/submissions/submit` still rejects `executorType: 'pipeline'`
+  with a 400 pointing callers at `/api/pipelines/run`. Single-tool
+  users are not affected by the simulator's existence.
+- `User.pipelineEnabled` defaults to `false` on the model so existing
+  users don't accidentally see the new feature.
+
 ## Security checklist
 
 - [ ] `JWT_SECRET` is a strong random value (not `dev_secret_key`).
