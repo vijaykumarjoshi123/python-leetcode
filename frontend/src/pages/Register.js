@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import axios from 'axios';
+import { authAPI } from '../services/api';
 import './Auth.css';
 
 function Register() {
@@ -23,16 +23,20 @@ function Register() {
 
     try {
       setLoading(true);
-      const response = await axios.post('/api/auth/register', {
+      // Bug 4 fix: route through the shared api instance — see
+      // Login.js for the full rationale (raw axios with a relative
+      // URL resolves against the frontend origin and never reaches
+      // the backend).
+      const response = await authAPI.register({
         username: formData.username,
         email: formData.email,
-        password: formData.password
+        password: formData.password,
       });
       localStorage.setItem('token', response.data.token);
       localStorage.setItem('user', JSON.stringify(response.data.user));
       navigate('/problems');
     } catch (err) {
-      setError(err.response?.data?.msg || 'Registration failed');
+      setError(err.response?.data?.msg || err.response?.data?.error || 'Registration failed');
     } finally {
       setLoading(false);
     }

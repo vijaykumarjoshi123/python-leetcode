@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { problemsAPI } from '../services/api';
 import './Problems.css';
 
@@ -27,9 +27,18 @@ const EXECUTOR_PILL_COLORS = {
 };
 
 function Problems() {
+  const [searchParams] = useSearchParams();
+  // Initial activeTrack honours a deep link like /problems?track=lakehouse.
+  // The backend honours the same query param so the filtered list is
+  // server-correct (see routes/problems.js). Falls back to 'all' when
+  // the URL doesn't carry a track or the value is unknown.
+  const initialTrack = (() => {
+    const t = searchParams.get('track');
+    return t && TRACKS.some(track => track.id === t) ? t : 'all';
+  })();
   const [problems, setProblems] = useState([]);
   const [filters, setFilters] = useState({ difficulty: '', category: '', search: '' });
-  const [activeTrack, setActiveTrack] = useState('all');
+  const [activeTrack, setActiveTrack] = useState(initialTrack);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -38,12 +47,20 @@ function Problems() {
   const fetchProblems = useCallback(async () => {
     try {
       setLoading(true);
+      // We always fetch the full set (limit: 100) regardless of the
+      // active track — the sidebar counts (trackCounts memo below) are
+      // derived from this set. Client-side filtering then narrows the
+      // visible list when the user clicks a track. Server-side track
+      // filtering is supported by the backend (see routes/problems.js)
+      // and used by direct URL navigation (?track=lakehouse), but the
+      // interactive sidebar drives the visible list without a
+      // round-trip so the counts stay stable.
       const params = { ...filters, page, limit: 100 };
       Object.keys(params).forEach(key => {
-        if (!params[key]) delete params[key];
+        if (params[key] === undefined || params[key] === '' || params[key] === null) {
+          delete params[key];
+        }
       });
-      // Fetch a large page so the track sidebar can show counts derived
-      // from the full set rather than just the current page.
       const response = await problemsAPI.getAll(params);
       setProblems(response.data.problems);
       setTotalPages(response.data.pages || 1);
@@ -189,6 +206,16 @@ function Problems() {
 
             {loading ? (
               <div className="loading">Loading problems...</div>
+            ) : problems.length === 0 ? (
+              // Bug 2 fix: when the database itself is empty (no seed
+              // has run), show guidance instead of a "Clear Filters"
+              // button that wouldn't help. The shell command works
+              // both inside the dev container and on a fresh clone
+              // that runs docker-compose up + this seed step.
+              <div className="no-results">
+                <p>No problems found.</p>
+                <p>Run: <code>docker-compose exec backend npm run seed</code></p>
+              </div>
             ) : visibleProblems.length === 0 ? (
               <div className="no-results">
                 <p>No problems found matching your filters.</p>

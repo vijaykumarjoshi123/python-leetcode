@@ -9,9 +9,12 @@
 const EXECUTOR_CONFIG = {
   python: {
     image: 'python-executor',
-    // The worker's run argv. `file` is the absolute path to the mounted
-    // source file inside the container.
-    buildCmd: (file) => ['python3', file],
+    // The runner script wraps user code execution: it reads the
+    // solution file, runs it in an isolated namespace, and emits the
+    // JSON contract `{passed, output, error, runtime_ms, result}`.
+    // The worker compares `result` against each test case's expected
+    // output via normalizeResult().
+    buildCmd: (file) => ['python3', '/runner/runner.py'],
     timeout: 5000,
     memoryMb: 256,
     toolVersion: 'Python 3.11',

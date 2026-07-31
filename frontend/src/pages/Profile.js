@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import axios from 'axios';
+import { leaderboardAPI } from '../services/api';
 import {
   Radar,
   RadarChart,
@@ -33,7 +33,9 @@ function Profile() {
 
   const fetchUser = async () => {
     try {
-      const response = await axios.get(`/api/leaderboard/user/${userId}`);
+      // Bug 4 fix: route through the shared api instance. See
+      // Login.js for the full rationale.
+      const response = await leaderboardAPI.getUserRank(userId);
       setUser(response.data);
     } catch (err) {
       console.error('Error fetching user:', err);

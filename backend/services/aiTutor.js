@@ -18,9 +18,9 @@ async function getAIHint(problem, userCode, submissionHistory = []) {
       Constraints: ${problem.constraints}
       
       Current User Code:
-      ```python
+      ~~~python
       ${userCode}
-      ```
+      ~~~
       
       Submission History:
       ${JSON.stringify(submissionHistory)}

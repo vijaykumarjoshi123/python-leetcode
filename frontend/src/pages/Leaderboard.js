@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import { leaderboardAPI } from '../services/api';
 import './Leaderboard.css';
 
 function Leaderboard() {
@@ -14,10 +14,12 @@ function Leaderboard() {
   const fetchLeaderboard = async () => {
     try {
       setLoading(true);
-      const endpoint = filter === 'all' 
-        ? '/api/leaderboard' 
-        : `/api/leaderboard/difficulty/${filter}`;
-      const response = await axios.get(endpoint, { params: { limit: 100 } });
+      // Bug 4 fix: route through the shared api instance. See
+      // Login.js for the full rationale on why raw axios with
+      // relative URLs is broken.
+      const response = filter === 'all'
+        ? await leaderboardAPI.getGlobal({ limit: 100 })
+        : await leaderboardAPI.getByDifficulty(filter, { limit: 100 });
       setLeaderboard(response.data.users || response.data);
     } catch (err) {
       console.error('Error fetching leaderboard:', err);

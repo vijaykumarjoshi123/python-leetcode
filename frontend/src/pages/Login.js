@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import axios from 'axios';
+import { authAPI } from '../services/api';
 import './Auth.css';
 
 function Login() {
@@ -17,12 +17,20 @@ function Login() {
     e.preventDefault();
     try {
       setLoading(true);
-      const response = await axios.post('/api/auth/login', formData);
+      // Bug 4 fix: route through the shared api instance so the
+      // request goes to REACT_APP_API_URL (the backend) instead of
+      // the relative origin (the frontend dev server, which returns
+      // 404). Using a raw axios.post('/api/...') without a baseURL
+      // would resolve the URL against the current page origin and
+      // never reach the backend — login would silently fail and
+      // localStorage would never receive the token, so a refresh
+      // would always bounce back to /login.
+      const response = await authAPI.login(formData);
       localStorage.setItem('token', response.data.token);
       localStorage.setItem('user', JSON.stringify(response.data.user));
       navigate('/problems');
     } catch (err) {
-      setError(err.response?.data?.msg || 'Login failed');
+      setError(err.response?.data?.msg || err.response?.data?.error || 'Login failed');
     } finally {
       setLoading(false);
     }

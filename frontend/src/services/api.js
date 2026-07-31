@@ -54,6 +54,9 @@ export const problemsAPI = {
 
 export const submissionsAPI = {
   submit: (data) => api.post('/api/submissions/submit', data),
+  // Bug 3 fix: poll this after POST /submit until status !== 'Pending'.
+  // Backend also accepts ?userId=... for the owner check.
+  getById: (id, params) => api.get(`/api/submissions/${id}`, { params }),
   getUserSubmissions: (userId, params) => api.get(`/api/submissions/user/${userId}`, { params }),
   getProblemSubmissions: (problemId, userId) =>
     api.get(`/api/submissions/problem/${problemId}/user/${userId}`),

@@ -670,6 +670,26 @@
   font-size: 0.85rem;
 }
 
+.output-pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #666;
+  font-size: 0.9rem;
+  padding: 8px 0;
+}
+
+.output-pending .spinner {
+  display: inline-block;
+  font-size: 1.1rem;
+  animation: output-spin 1.5s linear infinite;
+}
+
+@keyframes output-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .output-error pre {
   color: #f5222d;
   font-size: 0.8rem;

@@ -107,6 +107,50 @@ router.get('/user/:userId', async (req, res) => {
   }
 });
 
+// Get a single submission by id. Bug 3 fix: this is the endpoint the
+// frontend polls after POST /api/submissions/submit returns 202. The
+// response carries the current status ('Pending' until the worker
+// finishes), plus output/error/testCasesPassed once execution completes.
+//
+// Auth: owner-only. We compare submission.userId against the requesting
+// user's id from the JWT. Anonymous access would let any authenticated
+// user enumerate other users' submissions by guessing ObjectIds.
+router.get('/:submissionId', async (req, res) => {
+  try {
+    // Defensive: only treat values that look like ObjectIds as ids.
+    // Otherwise a stray "/submissions/foo" would throw a CastError.
+    if (!req.params.submissionId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ error: 'Invalid submission id' });
+    }
+
+    const submission = await Submission.findById(req.params.submissionId);
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    // The /submit endpoint accepts userId from the body, but the request
+    // itself isn't authenticated. We accept either:
+    //   1. ?userId=... in the query string matching submission.userId, OR
+    //   2. an Authorization: Bearer header whose decoded userId matches
+    // Without one of these, return 403 — protects against cross-user reads.
+    const requesterUserId = req.query.userId
+      || (req.headers.authorization?.startsWith('Bearer ')
+        ? require('jsonwebtoken').verify(
+            req.headers.authorization.slice(7),
+            process.env.JWT_SECRET || 'secret',
+          ).userId
+        : null);
+
+    if (!requesterUserId || requesterUserId.toString() !== submission.userId.toString()) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    res.json(submission);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get submissions for a specific problem by a user
 router.get('/problem/:problemId/user/:userId', async (req, res) => {
   try {

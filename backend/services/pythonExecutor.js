@@ -72,12 +72,35 @@ function runSingleTestCase(code, testCase, index, config) {
     // `fileExt` field if needed. For now the run command treats the path as
     // opaque, so extension is purely cosmetic.
     const extension = pickExtension(config.image);
-    const tmpDir = os.tmpdir();
-    const tmpFile = path.join(
-      tmpDir,
-      `lc_exec_${Date.now()}_${index}_${Math.random().toString(36).slice(2)}${extension}`
-    );
-    fs.writeFileSync(tmpFile, code, 'utf-8');
+    // Support an explicit code-exchange directory so a worker container can
+    // mount a host directory and instruct the host Docker daemon to bind-mount
+    // the same host path into the executor container. This avoids the
+    // container-internal vs host path confusion when the worker runs inside
+    // a container but needs the host's docker daemon to mount files.
+    const codeExchangeDir = process.env.CODE_EXCHANGE_DIR || os.tmpdir();
+    const hostExchangeDir = process.env.CODE_EXCHANGE_HOST_DIR || null; // e.g. /full/path/to/repo/code-exchange
+
+    // Ensure the exchange directory exists (inside the worker/container).
+    try { fs.mkdirSync(codeExchangeDir, { recursive: true }); } catch (e) { /* ignore */ }
+
+    const filename = `lc_exec_${Date.now()}_${index}_${Math.random().toString(36).slice(2)}${extension}`;
+    const containerPath = path.join(codeExchangeDir, filename);
+    fs.writeFileSync(containerPath, code, 'utf-8');
+
+    // Also write a test_cases.json file alongside the solution so executor
+    // runners that expect /sandbox/test_cases.json can read the specific
+    // test case for this invocation.
+    const testFilename = `${filename}.tc.json`;
+    const containerTestPath = path.join(codeExchangeDir, testFilename);
+    try { fs.writeFileSync(containerTestPath, JSON.stringify([testCase]), 'utf-8'); } catch (e) { /* ignore */ }
+
+    // Determine the host path to mount into the executor. When running the
+    // worker as a container that has the host dir mounted, the worker is
+    // given CODE_EXCHANGE_HOST_DIR (expanded by docker-compose to the host
+    // absolute path). If present, use it; otherwise fall back to the
+    // container-local path (works when the worker runs on the host).
+    const hostPath = hostExchangeDir ? path.join(hostExchangeDir, filename) : containerPath;
+    const hostTestPath = hostExchangeDir ? path.join(hostExchangeDir, testFilename) : containerTestPath;
 
     let timedOut = false;
     let stdout = '';
@@ -100,7 +123,8 @@ function runSingleTestCase(code, testCase, index, config) {
       '--net', 'none',
       '--memory', `${config.memoryMb}m`,
       '--cpus', '1.0',
-      '-v', `${tmpFile}:/sandbox/solution${extension}:ro`,
+      '-v', `${hostPath}:/sandbox/solution${extension}:ro`,
+      '-v', `${hostTestPath}:/sandbox/test_cases.json:ro`,
     ];
 
     if (config.useGpu) {
@@ -131,7 +155,8 @@ function runSingleTestCase(code, testCase, index, config) {
       const endTime = process.hrtime.bigint();
       const runtimeMs = Number(endTime - startTime) / 1_000_000;
 
-      try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
+      try { fs.unlinkSync(containerPath); } catch (e) { /* ignore */ }
+      try { fs.unlinkSync(containerTestPath); } catch (e) { /* ignore */ }
 
       if (timedOut) {
         resolve({
@@ -165,16 +190,25 @@ function runSingleTestCase(code, testCase, index, config) {
 
       try {
         const parsed = JSON.parse(stdout.trim());
-        const actual = normalizeResult(parsed.result);
+
+        const actualValue = parsed.hasOwnProperty('result')
+          ? parsed.result
+          : parsed.hasOwnProperty('output')
+            ? parsed.output
+            : null;
+
+        const actual = normalizeResult(actualValue);
         const expected = normalizeResult(testCase.output);
+
+        const passed = typeof parsed.passed === 'boolean' ? parsed.passed : actual === expected;
 
         resolve({
           input: testCase.input,
           expected: testCase.output,
-          actual: JSON.stringify(parsed.result),
-          passed: actual === expected,
-          error: null,
-          runtime: parsed.runtime || Math.round(runtimeMs * 100) / 100,
+          actual: actualValue === null ? null : JSON.stringify(actualValue),
+          passed,
+          error: parsed.error || null,
+          runtime: parsed.runtime_ms || parsed.runtime || Math.round(runtimeMs * 100) / 100,
           memory: parsed.memory || 0,
         });
       } catch (parseErr) {
@@ -192,8 +226,9 @@ function runSingleTestCase(code, testCase, index, config) {
 
     proc.on('error', (err) => {
       clearTimeout(timer);
-      try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
-      resolve({
+    try { fs.unlinkSync(containerPath); } catch (e) { /* ignore */ }
+    try { fs.unlinkSync(containerTestPath); } catch (e) { /* ignore */ }
+    resolve({
         input: testCase.input,
         expected: testCase.output,
         actual: null,

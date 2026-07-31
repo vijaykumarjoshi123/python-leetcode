@@ -1,0 +1,27 @@
+FROM node:20-slim
+
+# Install Docker CLI so the worker can spawn executor containers via the
+# host socket. The container image only needs the CLI binary; the
+# daemon runs on the host (mounted via /var/run/docker.sock).
+#
+# Why we need a separate worker image: the backend container has no
+# Docker CLI and no socket access. Splitting the executor-spawning code
+# into its own service fixes Bug 1 (every submission fails because
+# `spawn('docker', ...)` throws ENOENT inside the backend container).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends docker.io ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install production dependencies (skip dev deps — vitest etc. are
+# dev-only).
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# Copy source. .dockerignore excludes node_modules, tests, .env, etc.
+COPY . .
+
+ENV NODE_ENV=production
+
+CMD ["node", "worker.js"]

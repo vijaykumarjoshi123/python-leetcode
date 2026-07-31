@@ -1,5 +1,15 @@
 version: '3.8'
 
+# Top-level volumes. `code-exchange` is the bridge between the worker
+# (which writes per-job code/test-case files) and the executor containers
+# (which read them at /shared). Both the worker and the executor
+# containers mount this named volume at the same path so file writes
+# are visible across container boundaries.
+#
+# `mongodb_data` persists the database across container restarts.
+volumes:
+  mongodb_data:
+
 services:
   mongodb:
     image: mongo:6
@@ -15,6 +25,9 @@ services:
     ports:
       - "6379:6379"
 
+  # ---- Backend API ----
+  # ONLY enqueues jobs into BullMQ. NO Docker socket. NO worker code.
+  # The HTTP routes live here; execution happens in the `worker` service.
   backend:
     build: ./backend
     ports:
@@ -30,6 +43,35 @@ services:
     volumes:
       - ./backend:/app
 
+  # Dedicated worker that runs the BullMQ consumer and spawns executor
+  # containers. This service must have access to the Docker daemon/socket
+  # so it can run executor images. For safety and clarity we keep this
+  # separate from the API/backend container.
+  worker:
+    build: ./backend
+    command: ["node", "worker.js"]
+    environment:
+      RUN_WORKER: '1'
+      MONGODB_URI: mongodb://mongodb:27017/python-leetcode
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: dev_secret_key
+      NODE_ENV: development
+      # Inside the worker container the code-exchange dir is mounted at
+      # /code-exchange. docker-compose expands ${PWD} on the host to the
+      # absolute host path which the worker will pass to the `docker run -v`
+      # host-side mount so the executor sees the file.
+      CODE_EXCHANGE_DIR: /code-exchange
+      CODE_EXCHANGE_HOST_DIR: "${PWD}/code-exchange"
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./backend:/app
+      - ./code-exchange:/code-exchange
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: on-failure
+
+
   frontend:
     build:
       context: ./frontend
@@ -43,11 +85,22 @@ services:
     volumes:
       - ./frontend:/app
 
-  # Executor images. Each is built once and tagged as a stable name the
-  # backend worker spawns on demand via `docker run`. They are NOT run as
-  # services — adding `profiles:` keeps `docker-compose up` from starting
-  # six idle containers. To build all images explicitly:
+  # ---- Executor images ----
+  # Each is built once and tagged as a stable name the worker spawns
+  # on demand via `docker run`. They are NOT run as services — adding
+  # `profiles:` keeps `docker-compose up` from starting idle containers.
+  # To build all images explicitly:
   #   docker-compose -f docker-compose.yml -f docker-compose.build.yml build
+  #
+  # `python-executor` is the default executor. Its Dockerfile + runner
+  # live in docker/python-executor/. The runner reads /shared/solution.py
+  # (mounted from code-exchange) and writes a JSON result line to stdout.
+
+  python-executor:
+    build: ./docker/python-executor
+    image: python-executor:latest
+    profiles: ["build"]
+
   duckdb-executor:
     build: ./docker/duckdb-executor
     image: duckdb-executor:latest
@@ -87,6 +140,3 @@ services:
     build: ./docker/pipeline-runner
     image: pipeline-runner:latest
     profiles: ["build"]
-
-volumes:
-  mongodb_data:

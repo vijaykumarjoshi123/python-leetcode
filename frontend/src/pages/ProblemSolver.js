@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import Editor from '@monaco-editor/react';
 import { problemsAPI, submissionsAPI, forumAPI } from '../services/api';
@@ -122,15 +122,42 @@ function ProblemSolver() {
     }
   }, [activeTab, fetchSubmissions, fetchDiscussions, user?.id]);
 
+  // Bug 3 fix: keep the polling timer IDs in a ref so the unmount
+  // cleanup can clear them. Without this, navigating away mid-poll
+  // would leak setInterval ticks (and React state-set-on-unmounted warnings).
+  const pollHandlesRef = useRef({ interval: null, timeout: null });
+
+  useEffect(() => {
+    return () => {
+      const { interval, timeout } = pollHandlesRef.current;
+      if (interval) clearInterval(interval);
+      if (timeout) clearTimeout(timeout);
+    };
+  }, []);
+
   const handleSubmit = async () => {
     if (!user?.id) {
       setOutput({ error: 'Please login to submit code' });
       return;
     }
 
+    // Bug 3 fix: submissions are now async via BullMQ, so the POST
+    // returns the freshly-created Submission with status='Pending'.
+    // The actual result lands after the worker picks up the job, so
+    // we poll the per-submission GET endpoint until status is no
+    // longer 'Pending' (or we hit a 2-minute ceiling).
+
+    const stopPolling = () => {
+      if (pollHandlesRef.current.interval) clearInterval(pollHandlesRef.current.interval);
+      if (pollHandlesRef.current.timeout) clearTimeout(pollHandlesRef.current.timeout);
+      pollHandlesRef.current.interval = null;
+      pollHandlesRef.current.timeout = null;
+    };
+
     try {
       setSubmitting(true);
-      setOutput(null);
+      setOutput({ status: 'Pending', message: 'Queued — waiting for execution...' });
+
       // Spec 6B: include executorType so the router picks the right image
       // (python/sql/pyspark/dbt/airflow/kafka/iceberg). Falls back to
       // 'python' for legacy problems that don't have the field.
@@ -142,30 +169,69 @@ function ProblemSolver() {
         executorType: problem?.executorType || 'python',
       });
 
-      const submission = response.data;
-      let results = [];
-      try {
-        results = typeof submission.output === 'string'
-          ? JSON.parse(submission.output)
-          : submission.output;
-      } catch (e) {
-        results = [];
-      }
+      const submissionId = response.data._id;
 
-      setOutput({
-        status: submission.status,
-        testCasesPassed: submission.testCasesPassed,
-        totalTestCases: submission.totalTestCases,
-        runtime: submission.runtime,
-        results,
-        error: submission.error
-      });
+      const finishWithSubmission = (submission) => {
+        let results = [];
+        try {
+          results = typeof submission.output === 'string'
+            ? JSON.parse(submission.output)
+            : (submission.output || []);
+        } catch (e) {
+          results = [];
+        }
+        setOutput({
+          status: submission.status,
+          testCasesPassed: submission.testCasesPassed,
+          totalTestCases: submission.totalTestCases,
+          runtime: submission.runtime,
+          executionRuntime: submission.executionRuntime,
+          toolVersion: submission.toolVersion,
+          executorType: submission.executorType,
+          results,
+          error: submission.error,
+        });
+      };
+
+      // Poll every 2s until status leaves 'Pending'. Backend updates the
+      // submission doc atomically when the worker finishes, so a single
+      // fetch gives us the full terminal state.
+      pollHandlesRef.current.interval = setInterval(async () => {
+        try {
+          const statusRes = await submissionsAPI.getById(submissionId, {
+            userId: user.id,
+          });
+          const sub = statusRes.data;
+          if (sub && sub.status && sub.status !== 'Pending') {
+            stopPolling();
+            finishWithSubmission(sub);
+            setSubmitting(false);
+          }
+        } catch (pollErr) {
+          // Network blip on one poll — keep trying until the timeout.
+          // Don't surface to the user; the next tick might succeed.
+          console.warn('Polling submission status failed:', pollErr.message);
+        }
+      }, 2000);
+
+      // Give up after 2 minutes. The worker may still be processing,
+      // but the user shouldn't see a spinner forever — surface a TLE
+      // and let them retry from the Submissions tab.
+      pollHandlesRef.current.timeout = setTimeout(() => {
+        stopPolling();
+        setSubmitting(false);
+        setOutput({
+          status: 'Time Limit Exceeded',
+          error: 'Execution took longer than 2 minutes. Try a simpler approach.',
+        });
+      }, 120000);
+
     } catch (err) {
+      stopPolling();
+      setSubmitting(false);
       setOutput({
         error: err.response?.data?.error || err.message || 'Submission failed'
       });
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -536,6 +602,13 @@ function ProblemSolver() {
 
           <div className="monaco-wrapper">
             <Editor
+              // Bug 5 fix: key={problem._id} forces Monaco to fully
+              // remount when navigating between problems. Without it
+              // the editor's internal state (selection, undo history,
+              // cursor position) carries over from the previous
+              // problem — `value={code}` updates the visible text but
+              // doesn't reset Monaco's internal buffers.
+              key={problem?._id}
               height="100%"
               language={EXECUTOR_LANGUAGE[problem?.executorType || 'python'] || 'python'}
               theme="vs-dark"
@@ -590,6 +663,15 @@ function ProblemSolver() {
             <div className="output-content">
               {!output ? (
                 <span className="output-placeholder">Run your code to see output here...</span>
+              ) : output.status === 'Pending' ? (
+                // Bug 3 fix: while polling the BullMQ result, surface a
+                // "waiting" message instead of trying to render an empty
+                // results table (which would show "Passed 0/0 test cases"
+                // and confuse the user).
+                <div className="output-pending">
+                  <span className="spinner" aria-hidden="true">⏳</span>
+                  <span>{output.message || 'Execution in progress...'}</span>
+                </div>
               ) : output.error && !output.results ? (
                 <div className="output-error">
                   <pre>{output.error}</pre>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import axios from 'axios';
+import { problemsAPI } from '../services/api';
 import './Problem.css';
 
 function Problem() {
@@ -14,7 +14,9 @@ function Problem() {
 
   const fetchProblem = async () => {
     try {
-      const response = await axios.get(`/api/problems/${id}`);
+      // Bug 4 fix: route through the shared api instance — see
+      // Login.js for the full rationale.
+      const response = await problemsAPI.getById(id);
       setProblem(response.data);
     } catch (err) {
       console.error('Error fetching problem:', err);

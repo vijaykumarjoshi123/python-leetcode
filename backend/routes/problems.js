@@ -16,11 +16,15 @@ router.get('/categories', async (req, res) => {
 // Get all problems with filters
 router.get('/', async (req, res) => {
   try {
-    const { difficulty, category, search, limit = 20, page = 1 } = req.query;
+    const { difficulty, category, search, track, limit = 20, page = 1 } = req.query;
 
     let query = {};
     if (difficulty) query.difficulty = difficulty;
     if (category) query.category = category;
+    // Additional Change 3: server-side track filter so a deep link like
+    // /problems?track=data-engineering works without depending on the
+    // client-side filter (which only runs after fetching everything).
+    if (track) query.track = track;
     if (search) query.$or = [
       { title: { $regex: search, $options: 'i' } },
       { description: { $regex: search, $options: 'i' } }
