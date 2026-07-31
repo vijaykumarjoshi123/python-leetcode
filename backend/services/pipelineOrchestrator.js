@@ -401,6 +401,21 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
 
     const totalRuntimeMs = stageResults.reduce((s, r) => s + (r.runtimeMs || 0), 0);
 
+    // ---- Section 11J — compute the pipeline-aware score ----
+    // The score is correctness × operationalQuality. Correctness is
+    // computed from this run's stageResults. Operational sub-scores
+    // require a count of the user's previous attempts on this problem
+    // and a comparison of this attempt's stageCode to the previous one
+    // (to detect shotgun debugging).
+    const score = await computePipelineScore({
+      userId,
+      pipelineProblemId: problem._id,
+      scenarioId: scenarioId || null,
+      stageResults,
+      codeMap,
+      thisRuntimeMs: totalRuntimeMs,
+    });
+
     // ---- Persist ----
     const run = new PipelineRun({
       userId,
@@ -412,11 +427,164 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
       totalRuntimeMs,
       passed: pipelinePassed,
       error: '',
+      score,
       submittedAt: new Date(),
     });
     await run.save();
     return run;
   });
+}
+
+/**
+ * Section 11J — compute the pipeline-aware score for a single run.
+ *
+ *   score.total       = score.correctness * score.operational
+ *   score.correctness = (P + S) / N where
+ *                          P = stages passed
+ *                          S = stages skipped (count as "would have
+ *                              passed" — the user didn't get a chance
+ *                              to write bad code for these)
+ *                          N = total stage count
+ *   score.operational = average of three sub-scores ∈ [0, 1]:
+ *                          - attemptEfficiency (1.0 first try,
+ *                            -0.1 per extra attempt, floor 0.1)
+ *                          - timeEfficiency (1.0 if first try +
+ *                            pass OR first try + fast (<60s); degrades
+ *                            if many attempts OR slow runtimes)
+ *                          - noShotgun (1.0 if stageCode changed from
+ *                            previous attempt; 0.5 if identical code
+ *                            across multiple attempts)
+ *
+ * The previous-attempts lookup is best-effort: if the Mongo query
+ * fails (e.g. transient outage) we fall back to attempt #1 defaults
+ * (everything gets a fresh-attempt score) rather than failing the run.
+ */
+async function computePipelineScore({
+  userId,
+  pipelineProblemId,
+  scenarioId,
+  stageResults,
+  codeMap,
+  thisRuntimeMs,
+}) {
+  // ---- Correctness ----
+  const totalStages = stageResults.length;
+  const stagesPassed = stageResults.filter((s) => s.status === 'passed').length;
+  const stagesSkipped = stageResults.filter((s) => s.status === 'skipped').length;
+  const stagesFailed = stageResults.filter((s) =>
+    s.status === 'failed' || s.status === 'error'
+  ).length;
+  // Skipped stages count as full credit — the user didn't write the
+  // bad code that aborted them.
+  const correctness = totalStages === 0
+    ? 0
+    : Math.min(1, (stagesPassed + stagesSkipped) / totalStages);
+
+  // ---- Operational sub-scores ----
+  // Defaults: first attempt, first-try score = 1.0 across the board.
+  let attemptNumber = 1;
+  let previousAttempts = 0;
+  let noShotgun = 1.0;
+  let attemptEfficiency = 1.0;
+  let timeEfficiency = 1.0;
+
+  try {
+    // Look at the user's previous runs on THIS problem + scenario. We
+    // include scenarioId in the filter because the same problem with a
+    // different scenario is a different problem in the user's mind —
+    // a "1st attempt" on a fresh scenario shouldn't carry penalty from
+    // a different scenario's runs. Without a scenarioId we group all
+    // runs together (clean runs share an empty scenarioId).
+    const previous = await PipelineRun.find({
+      userId,
+      pipelineProblemId,
+      scenarioId: scenarioId || null,
+    })
+      .sort({ submittedAt: -1 })
+      .limit(10) // cap so we don't walk the full history
+      .select('stageCode submittedAt totalRuntimeMs passed');
+
+    previousAttempts = previous.length;
+    attemptNumber = previousAttempts + 1;
+
+    // attemptEfficiency: 1.0 first try; -0.1 per extra attempt; floor 0.1.
+    attemptEfficiency = Math.max(0.1, 1.0 - (attemptNumber - 1) * 0.1);
+
+    // timeEfficiency: combines attempt pressure with raw runtime. First
+    // attempt that passes (or runs in <60s) gets 1.0. Otherwise we
+    // discount by both dimensions.
+    const fastRun = thisRuntimeMs < 60000;
+    const firstTryPass = previousAttempts === 0;
+    if (firstTryPass && fastRun) {
+      timeEfficiency = 1.0;
+    } else if (firstTryPass && !fastRun) {
+      // Slow but first try — partial credit for slow startup.
+      timeEfficiency = 0.7;
+    } else {
+      // Multiple attempts — discount proportional to count and runtime.
+      // 2nd attempt → 0.6, 3rd → 0.5, etc., floor 0.3.
+      timeEfficiency = Math.max(0.3, 1.0 - (attemptNumber - 1) * 0.1);
+      if (!fastRun) timeEfficiency = Math.max(0.2, timeEfficiency - 0.2);
+    }
+
+    // noShotgun: compare this run's stageCode to the most-recent
+    // previous attempt. Identical code across attempts = shotgun
+    // debugging smell (0.5). Changed code = full credit.
+    if (previous.length > 0) {
+      const prevCode = previous[0].stageCode;
+      const identical = stageCodesEqual(prevCode, codeMap);
+      noShotgun = identical ? 0.5 : 1.0;
+    }
+  } catch (err) {
+    console.warn('[pipelineOrchestrator] score lookup failed:', err.message);
+    // Fall through with default scores (1.0) — the run still succeeds,
+    // it just doesn't get a meaningful operational score.
+  }
+
+  const operational = (attemptEfficiency + timeEfficiency + noShotgun) / 3;
+  const total = correctness * operational;
+
+  return {
+    correctness: round2(correctness),
+    operational: round2(operational),
+    total: round2(total),
+    breakdown: {
+      stagesPassed,
+      stagesSkipped,
+      stagesFailed,
+      attemptEfficiency: round2(attemptEfficiency),
+      timeEfficiency: round2(timeEfficiency),
+      noShotgun: round2(noShotgun),
+      attemptNumber,
+      previousAttempts,
+    },
+  };
+}
+
+/**
+ * Compare two stageCode maps (Mongoose Map or plain object). Returns
+ * true if every stageId's code matches byte-for-byte. Used by the
+ * shotgun-debugging detector.
+ */
+function stageCodesEqual(a, b) {
+  const toObj = (m) => {
+    if (!m) return {};
+    if (m instanceof Map) return Object.fromEntries(m);
+    return m;
+  };
+  const ao = toObj(a);
+  const bo = toObj(b);
+  const aKeys = Object.keys(ao);
+  const bKeys = Object.keys(bo);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const k of aKeys) {
+    if (!Object.is(ao[k], bo[k])) return false;
+  }
+  return true;
+}
+
+function round2(n) {
+  return Math.round((n || 0) * 100) / 100;
 }
 
 /**
@@ -890,4 +1058,7 @@ module.exports = {
   getDiagnosticsMode,
   // Section 11F — exported for unit tests.
   resolveFixtureMounts,
+  // Section 11J — exported for unit tests.
+  computePipelineScore,
+  stageCodesEqual,
 };

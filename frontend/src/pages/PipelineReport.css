@@ -399,3 +399,96 @@
   min-width: 60px;
   text-align: right;
 }
+
+/* Section 11J — score breakdown */
+.summary-card-score {
+  background: linear-gradient(135deg, #fff7e6 0%, #fffbe6 100%);
+  border: 1px solid #ffd591;
+}
+
+.summary-value-score {
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+
+.score-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.score-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) 1fr 60px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.score-row-subtotal {
+  border-top: 1px solid #eef2f7;
+  padding-top: 10px;
+  margin-top: 4px;
+}
+
+.score-row-label {
+  font-size: 0.9rem;
+  color: #333;
+  font-weight: 500;
+}
+
+.score-row-track {
+  height: 14px;
+  background: #eef2f7;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.score-row-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 200ms ease;
+}
+
+.score-row-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: right;
+  color: #333;
+}
+
+.score-row-note {
+  grid-column: 2 / 4;
+  font-size: 0.78rem;
+  color: #888;
+  margin-top: 2px;
+}
+
+.score-total {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0 0;
+  margin-top: 8px;
+  border-top: 2px solid #eef2f7;
+}
+
+.score-total-label {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #333;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.score-total-value {
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+
+.score-total-formula {
+  font-size: 0.85rem;
+  color: #888;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

@@ -125,8 +125,39 @@ function PipelineReport() {
                 {run.totalRuntimeMs != null ? `${Math.round(run.totalRuntimeMs)} ms` : '—'}
               </span>
             </div>
+            {/* Section 11J — pipeline-aware score. Surfaced as a 5th
+                summary card so the score is visible without scrolling
+                down to the breakdown section. */}
+            {run.score && (
+              <div className="summary-card summary-card-score">
+                <span className="summary-label">Score</span>
+                <span
+                  className="summary-value summary-value-score"
+                  style={{ color: scoreColor(run.score.total) }}
+                >
+                  {(run.score.total * 100).toFixed(0)}%
+                </span>
+              </div>
+            )}
           </div>
         </header>
+
+        {/* Section 11J — score breakdown. Only renders when score is
+            present (older PipelineRuns from before 11J won't have it).
+            Shows the four sub-scores + per-criterion detail so the
+            user can see exactly where their points went. */}
+        {run.score && (
+          <section className="report-section">
+            <h2>Score breakdown</h2>
+            <p className="section-subtitle">
+              Score = correctness × operational quality. Operational
+              combines attempt efficiency, time-to-diagnose, and a
+              shotgun-debugging detector (drops when identical code is
+              re-submitted).
+            </p>
+            <ScoreBreakdown score={run.score} />
+          </section>
+        )}
 
         <section className="report-section">
           <h2>Per-stage results</h2>
@@ -270,6 +301,100 @@ function PipelineReport() {
 function truncate(str, n) {
   if (!str) return '';
   return str.length <= n ? str : `${str.slice(0, n)}…`;
+}
+
+/**
+ * Section 11J — pick a colour for the total score. Green at 1.0,
+ * red at 0.0, amber in the middle. Used by both the header summary
+ * card and the breakdown bars.
+ */
+function scoreColor(value) {
+  if (value == null) return '#888';
+  if (value >= 0.8) return '#389e0d'; // green
+  if (value >= 0.5) return '#ad6800'; // amber
+  return '#a8071a'; // red
+}
+
+/**
+ * ScoreBreakdown — renders the four sub-scores with bar charts so the
+ * user can see exactly where their points came from.
+ *
+ * Layout:
+ *   ┌─────────────────────────────────────────────┐
+ *   │ Correctness            ████████░░   1.00     │
+ *   │ Operational            ███████░░░   0.73     │
+ *   │   ├ Attempt efficiency ███████░░░   0.60     │
+ *   │   ├ Time efficiency    ███████░░░   0.60     │
+ *   │   └ No shotgun         ██████████   1.00     │
+ *   │ Total = 1.00 × 0.73 = 0.73                  │
+ *   └─────────────────────────────────────────────┘
+ *
+ * Plus a metadata strip (attempt #N, previous attempts).
+ */
+function ScoreBreakdown({ score }) {
+  const b = score.breakdown || {};
+  return (
+    <div className="score-breakdown">
+      <ScoreRow
+        label="Correctness"
+        value={score.correctness}
+        note={`${b.stagesPassed || 0} passed / ${b.stagesSkipped || 0} skipped / ${b.stagesFailed || 0} failed`}
+      />
+      <ScoreRow
+        label="Operational"
+        value={score.operational}
+        note={`attempt #${b.attemptNumber || 1} (${b.previousAttempts || 0} previous)`}
+        isSubtotal
+      />
+      <ScoreRow
+        label="↳ Attempt efficiency"
+        value={b.attemptEfficiency}
+        note="1.0 first try; -0.1 per extra attempt"
+      />
+      <ScoreRow
+        label="↳ Time efficiency"
+        value={b.timeEfficiency}
+        note="<60s first try scores 1.0; multi-attempt or slow run degrades"
+      />
+      <ScoreRow
+        label="↳ No shotgun"
+        value={b.noShotgun}
+        note="1.0 if stageCode changed; 0.5 if identical code across attempts"
+      />
+      <div className="score-total">
+        <span className="score-total-label">Total</span>
+        <span
+          className="score-total-value"
+          style={{ color: scoreColor(score.total) }}
+        >
+          {(score.total * 100).toFixed(0)}%
+        </span>
+        <span className="score-total-formula">
+          = {(score.correctness * 100).toFixed(0)}% × {(score.operational * 100).toFixed(0)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ScoreRow({ label, value, note, isSubtotal }) {
+  const pct = Math.max(0, Math.min(1, value || 0)) * 100;
+  return (
+    <div className={`score-row ${isSubtotal ? 'score-row-subtotal' : ''}`}>
+      <div className="score-row-label">{label}</div>
+      <div className="score-row-track">
+        <div
+          className="score-row-bar"
+          style={{
+            width: `${pct}%`,
+            background: scoreColor(value),
+          }}
+        />
+      </div>
+      <div className="score-row-value">{((value || 0) * 100).toFixed(0)}%</div>
+      {note && <div className="score-row-note">{note}</div>}
+    </div>
+  );
 }
 
 /**

@@ -128,6 +128,62 @@ const pipelineRunSchema = new mongoose.Schema({
   // this fires when the orchestrator itself blew up (bad spec,
   // Docker spawn failure, etc.) before or between stages.
   error: { type: String, default: '' },
+  // Section 11J — pipeline-aware grading. `score` is the product of
+  // correctness and operational quality, computed by the orchestrator
+  // after the run finishes.
+  //
+  //   correctness ∈ [0, 1] — fraction of stages that passed
+  //                            (skipped stages count as 1.0 because the
+  //                             pipeline was correctly aborted when an
+  //                             upstream stage failed; the user didn't
+  //                             write bad code, they just didn't get to
+  //                             run it). For an N-stage pipeline with
+  //                             P passing and S skipped: P/N + (S/N)*1
+  //                             simplifies to (P+S)/N = (N - failed)/N.
+  //   operational ∈ [0, 1] — quality of the debugging process:
+  //                            - 1.0 if the run is the first attempt
+  //                            - decreases with repeated runs on the
+  //                              same problem (shotgun debugging)
+  //                            - decreases with long time-to-diagnose
+  //                              (slow runs cost operational points)
+  //   total     ∈ [0, 1]   — correctness * operational (rounded to 2dp)
+  //   breakdown — verbose per-criterion detail so the report page can
+  //                explain WHY a particular score was awarded
+  //
+  // `score` is optional and defaults to undefined so older PipelineRun
+  // documents from before 11J still validate. New runs always populate
+  // it; the orchestrator writes the full document atomically.
+  score: {
+    correctness: { type: Number, min: 0, max: 1, default: 0 },
+    operational: { type: Number, min: 0, max: 1, default: 1 },
+    total: { type: Number, min: 0, max: 1, default: 0 },
+    breakdown: {
+      // Stages passed / skipped / failed counts (correctness basis).
+      stagesPassed: { type: Number, default: 0 },
+      stagesSkipped: { type: Number, default: 0 },
+      stagesFailed: { type: Number, default: 0 },
+      // Operational sub-scores — each ∈ [0, 1]. Reported so the
+      // UI can show which dimension(s) cost the user points.
+      //   - attemptEfficiency: 1.0 on first attempt; degrades by
+      //                        0.1 per extra attempt on the same
+      //                        problem (floor 0.1). Cap at 5 attempts.
+      //   - timeEfficiency:    1.0 if the run was the first attempt
+      //                        AND it passed; degrades if multiple
+      //                        attempts are needed OR the pipeline
+      //                        takes longer than 60s wall-clock.
+      //   - noShotgun:         1.0 if the user code changed across
+      //                        attempts (revisions detected via stageCode
+      //                        diff); drops to 0.5 if multiple attempts
+      //                        had IDENTICAL code (smells like shotgun
+      //                        debugging).
+      attemptEfficiency: { type: Number, default: 1 },
+      timeEfficiency: { type: Number, default: 1 },
+      noShotgun: { type: Number, default: 1 },
+      // Counters for the UI badges.
+      attemptNumber: { type: Number, default: 1 },
+      previousAttempts: { type: Number, default: 0 },
+    },
+  },
   submittedAt: { type: Date, default: Date.now },
 });
 
