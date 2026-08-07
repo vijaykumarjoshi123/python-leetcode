@@ -9,7 +9,13 @@
   grid-template-columns: 1fr 1fr auto;
   width: 100%;
   gap: 0;
-  align-items: start;
+  /* No `align-items: start` here — the default `stretch` is what gives
+     each grid cell a defined height so .editor-panel can pass that
+     height down through .monaco-wrapper to Monaco. With `start`,
+     each cell collapses to its intrinsic content height and the
+     editor's `flex: 1` wrapper squeezes to ~0px, hiding the editor
+     while the header badge ("Running on: …") and footer buttons
+     remain visible. */
 }
 
 .hint-column {
@@ -505,6 +511,11 @@
   background: #1e1e1e;
   color: white;
   overflow: hidden;
+  /* Monaco's <Editor> needs a parent with an explicit height. The
+     .problem-solver wrapper sets `height: calc(100vh - 60px)`, and
+     with grid `align-items` defaulting to stretch this column
+     inherits that full height. */
+  min-height: 0;
 }
 
 .editor-header {
@@ -789,6 +800,9 @@
   }
 
   .editor-panel {
+    /* On narrow viewports the grid collapses to one column and the
+       panel can no longer inherit the row's height — give it an
+       explicit 60vh so Monaco still has room to render. */
     height: 60vh;
   }
 }

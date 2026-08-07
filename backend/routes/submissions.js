@@ -2,24 +2,31 @@ const express = require('express');
 const Submission = require('../models/Submission');
 const Problem = require('../models/Problem');
 const User = require('../models/User');
+const auth = require('../middleware/auth');
 const { submissionQueue } = require('../services/submissionQueue');
 const { isValidExecutorType, VALID_EXECUTOR_TYPES } = require('../services/executorRouter');
 
 const router = express.Router();
 
-// Submit code for execution
-router.post('/submit', async (req, res) => {
+// Submit code for execution.
+//
+// Auth: requires a valid JWT. The submitter's userId is taken from the
+// VERIFIED token (req.user.userId), NOT from the request body — accepting
+// userId from the body let any caller submit code as any other user
+// (impersonation, stat pollution). The body's userId, if present, is
+// ignored.
+router.post('/submit', auth, async (req, res) => {
   try {
+    const userId = req.user.userId || req.user.id;
     const {
-      userId,
       problemId,
       code,
       language = 'python',
       executorType,
     } = req.body;
 
-    if (!userId || !problemId || !code) {
-      return res.status(400).json({ error: 'userId, problemId, and code are required' });
+    if (!problemId || !code) {
+      return res.status(400).json({ error: 'problemId and code are required' });
     }
 
     // Validate executorType against the whitelist exposed by the router.

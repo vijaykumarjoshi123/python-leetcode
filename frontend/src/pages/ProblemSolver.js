@@ -562,10 +562,12 @@ function ProblemSolver() {
                         </div>
                       </div>
                     )}
-                    <div className="solution-code">
-                      <h4>Solution Code</h4>
-                      <pre><code>{problem.solution.code}</code></pre>
-                    </div>
+                    {problem.solution.code && (
+                      <div className="solution-code">
+                        <h4>Solution Code</h4>
+                        <pre><code>{problem.solution.code}</code></pre>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <p className="placeholder-text">

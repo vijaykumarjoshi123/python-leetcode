@@ -28,13 +28,16 @@ function Navbar() {
     <nav className="navbar">
       <div className="navbar-container">
         <Link to="/" className="navbar-logo">
-          🐍 PythonCode
+          🥷 ETLninja
         </Link>
         
         <div className="navbar-menu">
           <Link to="/problems" className="nav-link">Problems</Link>
           <Link to="/leaderboard" className="nav-link">Leaderboard</Link>
-          <Link to="/" className="nav-link">Discuss</Link>
+          {/* Discussions live inline on each problem's solver page
+              (the "Discuss" tab in ProblemSolver). There is no
+              standalone forum index yet, so we don't link one here —
+              the previous link pointed at "/" (dead). */}
           
           {isLoggedIn ? (
             <div className="nav-user">

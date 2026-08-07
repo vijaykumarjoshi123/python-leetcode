@@ -72,13 +72,34 @@ function runSingleTestCase(code, testCase, index, config) {
     // `fileExt` field if needed. For now the run command treats the path as
     // opaque, so extension is purely cosmetic.
     const extension = pickExtension(config.image);
-    // Support an explicit code-exchange directory so a worker container can
-    // mount a host directory and instruct the host Docker daemon to bind-mount
-    // the same host path into the executor container. This avoids the
-    // container-internal vs host path confusion when the worker runs inside
-    // a container but needs the host's docker daemon to mount files.
+
+    // ---- File exchange between worker and executor ----
+    //
+    // The worker writes each job's solution + test-case files into a shared
+    // location, then mounts that same location (read-only) into the executor
+    // container it spawns. Two modes are supported:
+    //
+    //   1. Named Docker volume (recommended, docker-compose default).
+    //      CODE_EXCHANGE_VOLUME names the volume; the worker mounts it at
+    //      CODE_EXCHANGE_DIR inside itself, and passes
+    //      `-v <volume>:/code-exchange:ro` to the executor. Because BOTH
+    //      sides reference the same named volume, there is NO host path to
+    //      compute — this is what makes it robust regardless of which host
+    //      directory `docker compose` was invoked from.
+    //
+    //   2. Host bind-mount (legacy / bare-metal dev). CODE_EXCHANGE_HOST_DIR
+    //      gives the host-side absolute path of CODE_EXCHANGE_DIR; the worker
+    //      passes `-v <hostDir>/<file>:/sandbox/solution.*:ro` per file.
+    //      Kept for the case where the worker runs natively (no compose).
+    //
+    // The previous implementation relied solely on mode 2 with a `${PWD}`
+    // expansion that depended on the shell's CWD when compose ran — if that
+    // wasn't the repo root, the host path was wrong, Docker silently created
+    // an empty dir, and the executor found no solution file. Every submission
+    // failed. Mode 1 removes that failure mode entirely.
     const codeExchangeDir = process.env.CODE_EXCHANGE_DIR || os.tmpdir();
-    const hostExchangeDir = process.env.CODE_EXCHANGE_HOST_DIR || null; // e.g. /full/path/to/repo/code-exchange
+    const exchangeVolume = process.env.CODE_EXCHANGE_VOLUME || null;
+    const hostExchangeDir = process.env.CODE_EXCHANGE_HOST_DIR || null;
 
     // Ensure the exchange directory exists (inside the worker/container).
     try { fs.mkdirSync(codeExchangeDir, { recursive: true }); } catch (e) { /* ignore */ }
@@ -94,13 +115,19 @@ function runSingleTestCase(code, testCase, index, config) {
     const containerTestPath = path.join(codeExchangeDir, testFilename);
     try { fs.writeFileSync(containerTestPath, JSON.stringify([testCase]), 'utf-8'); } catch (e) { /* ignore */ }
 
-    // Determine the host path to mount into the executor. When running the
-    // worker as a container that has the host dir mounted, the worker is
-    // given CODE_EXCHANGE_HOST_DIR (expanded by docker-compose to the host
-    // absolute path). If present, use it; otherwise fall back to the
-    // container-local path (works when the worker runs on the host).
-    const hostPath = hostExchangeDir ? path.join(hostExchangeDir, filename) : containerPath;
-    const hostTestPath = hostExchangeDir ? path.join(hostExchangeDir, testFilename) : containerTestPath;
+    // Decide how the executor will see these files:
+    //   - Volume mode: both files live under /code-exchange/<filename> inside
+    //     the executor (the volume is mounted there), and we mount the whole
+    //     volume read-only.
+    //   - Bind mode: mount each file individually at the legacy /sandbox/...
+    //     paths; the host path is hostExchangeDir + filename.
+    const useVolume = !!exchangeVolume;
+    const execSolutionPath = useVolume
+      ? path.join('/code-exchange', filename)
+      : `/sandbox/solution${extension}`;
+    const execTestPath = useVolume
+      ? path.join('/code-exchange', testFilename)
+      : '/sandbox/test_cases.json';
 
     let timedOut = false;
     let stdout = '';
@@ -117,25 +144,61 @@ function runSingleTestCase(code, testCase, index, config) {
     //   --memory       limit RAM (from router config — Spark needs 1GB+)
     //   --cpus         limit CPU
     //   --gpus all     only when the executor declares useGpu (router-driven)
-    //   -v             mount the specific temp file as read-only
+    //   -v             mount the code-exchange volume (read-only), OR per-file
+    //                  bind-mounts in legacy host-dir mode.
+    //   --hostname localhost  the container's own hostname resolves to
+    //                  127.0.0.1. Without this, the JVM (Spark/Airflow)
+    //                  crashes on startup with UnknownHostException because
+    //                  --net none has no DNS and the default hostname (the
+    //                  random container id) can't be resolved.
     const dockerArgs = [
       'run', '--rm',
       '--net', 'none',
+      '--hostname', 'localhost',
       '--memory', `${config.memoryMb}m`,
       '--cpus', '1.0',
-      '-v', `${hostPath}:/sandbox/solution${extension}:ro`,
-      '-v', `${hostTestPath}:/sandbox/test_cases.json:ro`,
     ];
+
+    if (useVolume) {
+      // One named-volume mount, read-only. The executor reads the specific
+      // job file by its path under /code-exchange.
+      dockerArgs.push('-v', `${exchangeVolume}:/code-exchange:ro`);
+    } else {
+      // Legacy per-file bind-mounts against the host dir.
+      const hostSolutionPath = hostExchangeDir
+        ? path.join(hostExchangeDir, filename)
+        : containerPath;
+      const hostTestPath = hostExchangeDir
+        ? path.join(hostExchangeDir, testFilename)
+        : containerTestPath;
+      dockerArgs.push(
+        '-v', `${hostSolutionPath}:/sandbox/solution${extension}:ro`,
+        '-v', `${hostTestPath}:/sandbox/test_cases.json:ro`,
+      );
+    }
 
     if (config.useGpu) {
       dockerArgs.push('--gpus', 'all');
     }
 
+    // Tell the runner where to find the solution + test-case files via env.
+    // python/iceberg/airflow runners read SUBMISSION_FILE / TEST_CASES_PATH
+    // (defaulting to /sandbox/...); in volume mode the files live under
+    // /code-exchange/<file>, so we override the defaults here. The shell
+    // runners (sql/spark/dbt/kafka) take the path as $1, which buildCmd
+    // already receives as execSolutionPath — the env is harmless for them.
+    dockerArgs.push(
+      '-e', `SUBMISSION_FILE=${execSolutionPath}`,
+      '-e', `TEST_CASES_PATH=${execTestPath}`,
+    );
+
     // The image name and the run argv both come from the router so a new
     // executor type doesn't need a code change here. buildCmd already returns
-    // an argv array — no shell quoting required.
-    const inContainerPath = `/sandbox/solution${extension}`;
-    dockerArgs.push(config.image, ...config.buildCmd(inContainerPath));
+    // an argv array — no shell quoting required. In volume mode we pass the
+    // executor-side solution path (/code-exchange/<file>) so runners that
+    // take the file path as an argument read the right file; in bind mode
+    // we pass /sandbox/solution.* as before.
+    dockerArgs.push(config.image, ...config.buildCmd(execSolutionPath));
 
     const proc = spawn('docker', dockerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -174,7 +237,7 @@ function runSingleTestCase(code, testCase, index, config) {
       if (exitCode !== 0 || stderr) {
         const cleanedStderr = stderr
           .replace(/File ".*", line \d+/g, 'File "<your code>"')
-          .replace(new RegExp(inContainerPath.replace(/\./g, '\\.'), 'g'), '<your code>')
+          .replace(new RegExp(execSolutionPath.replace(/\./g, '\\.'), 'g'), '<your code>')
           .trim();
         resolve({
           input: testCase.input,

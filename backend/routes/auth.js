@@ -2,29 +2,50 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const validate = require('../middleware/validate');
 
 const router = express.Router();
 
 // Register
-router.post('/register', async (req, res) => {
+//
+// Accepts an optional `accountType` ('individual' | 'company') and, when
+// company, a `companyName`. Previously the route destructured only
+// {username, email, password}, silently forcing every user to
+// accountType='individual' — which made the entire Assessments feature
+// (gated on accountType==='company') unreachable. Also validates required
+// fields up front so a missing password returns a clean 400 instead of
+// leaking a raw bcrypt error as a 500.
+router.post('/register', validate(['username', 'email', 'password']), async (req, res) => {
   try {
     const { username, email, password } = req.body;
-    
+    const accountType = req.body.accountType === 'company' ? 'company' : 'individual';
+    const companyName = accountType === 'company'
+      ? (typeof req.body.companyName === 'string' ? req.body.companyName.trim() : '')
+      : '';
+
+    // Basic email shape check so "not an email" is a 400, not a silent
+    // weird user record.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ msg: 'Please provide a valid email address' });
+    }
+
     // Check if user exists
     let user = await User.findOne({ $or: [{ email }, { username }] });
     if (user) return res.status(400).json({ msg: 'User already exists' });
-    
+
     // Hash password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
-    
+
     // Create user
     user = new User({
       username,
       email,
-      password: hashedPassword
+      password: hashedPassword,
+      accountType,
+      companyName,
     });
-    
+
     await user.save();
 
     // Generate JWT
@@ -43,6 +64,7 @@ router.post('/register', async (req, res) => {
         username,
         email,
         accountType: user.accountType,
+        companyName: user.companyName,
         pipelineEnabled: !!user.pipelineEnabled,
       },
     });

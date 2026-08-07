@@ -16,6 +16,13 @@
 
 const mongoose = require('mongoose');
 const Problem = require('./models/Problem');
+// Bug #7: also seed pipeline problems + scenarios so the Tier-3 Pipelines
+// feature has content. Without this, db.pipelineproblems stays empty and
+// the Pipelines index page lists nothing.
+const PipelineProblem = require('./models/PipelineProblem');
+const PipelineScenario = require('./models/PipelineScenario');
+const PIPELINE_PROBLEMS = require('./seeds/pipeline_problems');
+const PIPELINE_SCENARIOS = require('./seeds/pipeline_scenarios');
 require('dotenv').config();
 
 // Bug 5 fix: the Problem schema declares starterCode as a
@@ -192,7 +199,7 @@ You can return the answer in any order.`,
 async function seedDatabase() {
   try {
     await mongoose.connect(
-      process.env.MONGODB_URI || 'mongodb://localhost:27017/python-leetcode',
+      process.env.MONGODB_URI || 'mongodb://localhost:27017/etlninja',
     );
 
     // Idempotent upsert per problem. This means re-running the seed
@@ -221,6 +228,38 @@ async function seedDatabase() {
     }
 
     console.log(`✅ Seed complete — ${created} created, ${updated} updated`);
+
+    // ---- Pipeline problems + scenarios (Bug #7) ----
+    let pCount = 0;
+    for (const p of PIPELINE_PROBLEMS) {
+      await PipelineProblem.findOneAndUpdate(
+        { slug: p.slug },
+        { $set: p },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      pCount += 1;
+    }
+    let sCount = 0;
+    for (const s of PIPELINE_SCENARIOS) {
+      const parent = await PipelineProblem.findOne({ slug: s.pipelineProblemSlug });
+      if (!parent) continue; // scenario whose parent problem isn't seeded
+      await PipelineScenario.findOneAndUpdate(
+        { pipelineProblemId: parent._id, slug: s.slug },
+        {
+          $set: {
+            pipelineProblemId: parent._id,
+            slug: s.slug,
+            name: s.name,
+            description: s.description,
+            failures: s.failures,
+            expectedDiagnosis: s.expectedDiagnosis,
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      sCount += 1;
+    }
+    console.log(`✅ Pipeline seed complete — ${pCount} problems, ${sCount} scenarios`);
 
     await mongoose.connection.close();
     process.exit(0);

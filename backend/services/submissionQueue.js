@@ -42,8 +42,16 @@ const submissionQueue = new Queue('submissions', { connection });
 if (process.env.RUN_WORKER === '1') {
   console.log('[submissionQueue] RUN_WORKER=1 — starting BullMQ Worker');
 
+  // How many submission jobs the worker processes in parallel. Distinct
+  // from MAX_CONCURRENT_EXECUTIONS (which caps in-flight docker spawns
+  // inside concurrencyGuard.js): the worker can pull N jobs but each job
+  // runs its test cases under the guard, so the effective docker-spawn cap
+  // is the smaller of the two. Historically both read MAX_CONCURRENT_EXECUTIONS
+  // but disagreed on the default (5 here vs 10 in the guard), which was
+  // confusing. This var now has its own name and a default that won't
+  // overwhelm a single dev box.
   const workerConcurrency = parseInt(
-    process.env.MAX_CONCURRENT_EXECUTIONS || '5',
+    process.env.SUBMISSION_WORKER_CONCURRENCY || '5',
     10,
   );
 

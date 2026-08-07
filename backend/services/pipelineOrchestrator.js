@@ -135,7 +135,7 @@ function resolveFixtureMounts(stage, problem) {
  * resolveFixtureMounts, but the hostPath now lives inside
  * `runFixtureRoot`.
  */
-function resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot) {
+function resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot, runFixtureHostRoot) {
   if (!stage || !problem || !Array.isArray(stage.inputFixtures) || stage.inputFixtures.length === 0) {
     return [];
   }
@@ -153,6 +153,13 @@ function resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot
     else if (rel.startsWith('/')) rel = rel.slice(1);
     const sourcePath = path.join(sourceProblemRoot, rel);
     const destPath = path.join(runFixtureRoot, rel);
+    // hostPath is what we tell the Docker daemon to bind-mount. When the
+    // worker runs in a container, destPath is container-internal and
+    // invisible to the host daemon; runFixtureHostRoot is the host-side
+    // mirror of runFixtureRoot (both come from the same bind mount), so we
+    // use that. When runFixtureHostRoot is null (bare-metal dev), destPath
+    // IS the host path.
+    const hostPath = runFixtureHostRoot ? path.join(runFixtureHostRoot, rel) : destPath;
 
     // Ensure parent dir exists.
     try {
@@ -188,7 +195,7 @@ function resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot
       }
     }
 
-    mounts.push({ hostPath: destPath, containerPath: fx.path });
+    mounts.push({ hostPath, containerPath: fx.path });
   }
   return mounts;
 }
@@ -309,7 +316,7 @@ function topoSort(stages) {
  * user, etc.); per-stage failures are recorded in the returned doc
  * with passed:false rather than thrown.
  */
-async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId }) {
+async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId, runId }) {
   if (!pipelineProblemId) throw new Error('pipelineProblemId is required');
   if (!userId) throw new Error('userId is required');
 
@@ -353,14 +360,28 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
     // PIPELINE_FIXTURES_TMP (default os.tmpdir()) and is named with
     // a random suffix; cleanup is best-effort (the OS reclaims /tmp
     // on reboot).
-    const runId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    const fixturesRoot = process.env.PIPELINE_FIXTURES_TMP ||
-      require('os').tmpdir();
+    //
+    // The per-run fixture root MUST live inside a directory that the host
+    // Docker daemon can also see, because the orchestrator tells the daemon
+    // to bind-mount these per-run files into stage containers. If it lives
+    // under os.tmpdir() inside the worker container, the host can't see it
+    // and every stage that needs fixtures fails (same class of bug as the
+    // single-tool code-exchange path mismatch). PIPELINE_FIXTURES_TMP is a
+    // host-bind-mounted dir (set by docker-compose) whose host-side path is
+    // given by PIPELINE_FIXTURES_HOST_TMP; the orchestrator writes per-run
+    // copies inside it and tells the daemon to bind the host-side path.
+    const fixtureRunTag = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const fixturesRoot = process.env.PIPELINE_FIXTURES_TMP || require('os').tmpdir();
+    const fixturesHostRoot = process.env.PIPELINE_FIXTURES_HOST_TMP || null;
     const runFixtureRoot = path.join(
       fixturesRoot,
-      `pipeline-fixtures-${runId}`,
+      `pipeline-fixtures-${fixtureRunTag}`,
       problem.slug,
     );
+    // Host-side equivalent of runFixtureRoot, used for the docker -v source.
+    const runFixtureHostRoot = fixturesHostRoot
+      ? path.join(fixturesHostRoot, `pipeline-fixtures-${fixtureRunTag}`, problem.slug)
+      : null;
     try {
       fs.mkdirSync(runFixtureRoot, { recursive: true });
     } catch (e) {
@@ -391,7 +412,7 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
       }
 
       const stageCodeStr = codeMap.get(stage.id) || '';
-      const result = await runSingleStage(stage, stageCodeStr, failures, problem, runFixtureRoot);
+      const result = await runSingleStage(stage, stageCodeStr, failures, problem, runFixtureRoot, runFixtureHostRoot);
       stageResults.push(result);
       if (result.status !== 'passed' && result.status !== 'skipped') {
         pipelinePassed = false;
@@ -417,7 +438,14 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
     });
 
     // ---- Persist ----
-    const run = new PipelineRun({
+    // When called from the pipeline queue worker, the route has already
+    // created a PipelineRun document in 'pending' state and passed its
+    // _id as runId. In that case we update that existing doc in place so
+    // the frontend's poll (GET /run/:runId) sees the same id transition
+    // from pending -> completed. When runId is absent (direct call, e.g.
+    // from unit tests or a one-off script), fall back to creating a new
+    // document as before.
+    const resultPayload = {
       userId,
       pipelineProblemId,
       scenarioId: scenarioId || null,
@@ -427,9 +455,24 @@ async function runPipeline({ pipelineProblemId, userId, stageCode, scenarioId })
       totalRuntimeMs,
       passed: pipelinePassed,
       error: '',
+      status: 'completed',
       score,
       submittedAt: new Date(),
-    });
+    };
+
+    let run;
+    if (runId) {
+      run = await PipelineRun.findByIdAndUpdate(
+        runId,
+        { $set: resultPayload },
+        { new: true },
+      );
+      // If the pre-allocated doc vanished (deleted mid-run), fall back to
+      // creating one rather than returning null.
+      if (!run) run = new PipelineRun({ _id: runId, ...resultPayload });
+    } else {
+      run = new PipelineRun(resultPayload);
+    }
     await run.save();
     return run;
   });
@@ -843,7 +886,7 @@ function shouldPersistDiagnostics(stageStatus) {
   return stageStatus === 'failed' || stageStatus === 'error';
 }
 
-function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
+function runSingleStage(stage, code, allFailures, problem, runFixtureRoot, runFixtureHostRoot) {
   const config = getExecutorConfig(stage.executorType);
   // Section 11F — when we have a per-run fixture root, the orchestrator
   // is doing real fixture mutations, so flip fixture-layer failures
@@ -863,19 +906,37 @@ function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
   // Without runFixtureRoot (e.g. legacy / test paths), fall back to the
   // read-only source fixtures.
   const fixtureMounts = runFixtureRoot
-    ? resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot)
+    ? resolveMutatedFixtureMounts(stage, problem, allFailures, runFixtureRoot, runFixtureHostRoot)
     : resolveFixtureMounts(stage, problem);
 
   return new Promise((resolve) => {
     const start = process.hrtime.bigint();
 
-    // Write the per-stage user code to a temp file. The orchestrator
-    // owns this file's lifecycle — unlinked in the close handler.
-    const tmpFile = path.join(
-      os.tmpdir(),
-      `lc_pipe_${Date.now()}_${Math.random().toString(36).slice(2)}${extension}`
-    );
+    // Write the per-stage user code to a temp file inside a HOST-VISIBLE
+    // dir, because the orchestrator (running in the worker container) tells
+    // the host Docker daemon to bind-mount this file into the stage
+    // container. A container-internal path (e.g. os.tmpdir() inside the
+    // worker) is invisible to the host daemon, which would silently create
+    // an empty dir and the stage would find no solution file.
+    //
+    // We prefer the dedicated PIPELINE_CODE_EXCHANGE_* vars (a host bind
+    // mount whose in-container and host paths both resolve to the same
+    // files). Falling back to the single-tool CODE_EXCHANGE_* vars works
+    // only in bare-metal dev where the worker runs natively; os.tmpdir() is
+    // the last resort.
+    const codeExchangeDir = process.env.PIPELINE_CODE_EXCHANGE_DIR
+      || process.env.CODE_EXCHANGE_DIR
+      || os.tmpdir();
+    const codeExchangeHostDir = process.env.PIPELINE_CODE_EXCHANGE_HOST_DIR
+      || process.env.CODE_EXCHANGE_HOST_DIR
+      || null;
+    const codeFileName = `lc_pipe_${Date.now()}_${Math.random().toString(36).slice(2)}${extension}`;
+    const tmpFile = path.join(codeExchangeDir, codeFileName);
+    const tmpHostFile = codeExchangeHostDir
+      ? path.join(codeExchangeHostDir, codeFileName)
+      : tmpFile;
     try {
+      fs.mkdirSync(codeExchangeDir, { recursive: true });
       fs.writeFileSync(tmpFile, code || '', 'utf-8');
     } catch (e) {
       resolve(stageResultError(stage, `could not write stage code: ${e.message}`, 0, appliedFailures));
@@ -893,9 +954,15 @@ function runSingleStage(stage, code, allFailures, problem, runFixtureRoot) {
     const dockerArgs = [
       'run', '--rm',
       '--net', 'none',
+      // JVM-based stages (pyspark, airflow) crash on startup under
+      // --net none with UnknownHostException because the default hostname
+      // (the container id) can't be resolved without DNS. Fixing the
+      // hostname to localhost (which always resolves to 127.0.0.1) lets
+      // those stages boot while keeping the network fully disabled.
+      '--hostname', 'localhost',
       '--memory', `${effectiveMemoryMb}m`,
       '--cpus', '1.0',
-      '-v', `${tmpFile}:/sandbox/solution${extension}:ro`,
+      '-v', `${tmpHostFile}:/sandbox/solution${extension}:ro`,
     ];
     // Section 11F — mount each input fixture at the in-container path
     // the stage declares. Mounted read-only; the per-tool runner reads

@@ -50,7 +50,7 @@ services:
     # NO `ports:` — only the backend on the platform-net network reaches
     # mongo. Expose 27017 directly on the host in dev only.
     environment:
-      MONGO_INITDB_DATABASE: python-leetcode
+      MONGO_INITDB_DATABASE: etlninja
     volumes:
       - mongodb_data:/data/db
     networks: [platform-net]

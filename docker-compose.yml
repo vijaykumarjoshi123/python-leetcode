@@ -1,14 +1,20 @@
-version: '3.8'
-
-# Top-level volumes. `code-exchange` is the bridge between the worker
-# (which writes per-job code/test-case files) and the executor containers
-# (which read them at /shared). Both the worker and the executor
-# containers mount this named volume at the same path so file writes
-# are visible across container boundaries.
+# Top-level volumes.
+#
+# `code-exchange` is a NAMED Docker volume shared between the worker and
+# the executor containers it spawns. The worker writes each job's
+# solution/test-case files into this volume; each executor container
+# mounts the SAME named volume (read-only) so it can read them. Using a
+# named volume — instead of a host bind-mount whose path depended on the
+# shell's $PWD when compose ran — removes the entire class of
+# "host path mismatch" bugs that previously caused every submission to
+# fail (the worker told the daemon to mount a host path that didn't
+# exist, so Docker silently created an empty dir and the executor found
+# no solution file).
 #
 # `mongodb_data` persists the database across container restarts.
 volumes:
   mongodb_data:
+  code-exchange:
 
 services:
   mongodb:
@@ -16,7 +22,7 @@ services:
     ports:
       - "27017:27017"
     environment:
-      MONGO_INITDB_DATABASE: python-leetcode
+      MONGO_INITDB_DATABASE: etlninja
     volumes:
       - mongodb_data:/data/db
 
@@ -33,7 +39,7 @@ services:
     ports:
       - "5000:5000"
     environment:
-      MONGODB_URI: mongodb://mongodb:27017/python-leetcode
+      MONGODB_URI: mongodb://mongodb:27017/etlninja
       REDIS_URL: redis://redis:6379
       JWT_SECRET: dev_secret_key
       NODE_ENV: development
@@ -52,22 +58,45 @@ services:
     command: ["node", "worker.js"]
     environment:
       RUN_WORKER: '1'
-      MONGODB_URI: mongodb://mongodb:27017/python-leetcode
+      MONGODB_URI: mongodb://mongodb:27017/etlninja
       REDIS_URL: redis://redis:6379
       JWT_SECRET: dev_secret_key
       NODE_ENV: development
-      # Inside the worker container the code-exchange dir is mounted at
-      # /code-exchange. docker-compose expands ${PWD} on the host to the
-      # absolute host path which the worker will pass to the `docker run -v`
-      # host-side mount so the executor sees the file.
+      # The worker writes per-job files to CODE_EXCHANGE_DIR (/code-exchange),
+      # the in-container mount point of the `code-exchange` named volume. For
+      # SINGLE-TOOL submissions it spawns executor containers mounting the
+      # SAME named volume (CODE_EXCHANGE_VOLUME), so there is no host-path
+      # to reason about.
       CODE_EXCHANGE_DIR: /code-exchange
-      CODE_EXCHANGE_HOST_DIR: "${PWD}/code-exchange"
+      CODE_EXCHANGE_VOLUME: python-leetcode_code-exchange
+      # Pipeline fixtures root (read-only source fixtures). The code default
+      # resolves WRONG inside the worker, so we mount the host fixtures and
+      # point PIPELINE_FIXTURES_ROOT at the in-container path. Without this,
+      # every pipeline stage needing fixtures fails "source fixture not found".
+      PIPELINE_FIXTURES_ROOT: /pipeline-fixtures
+      # PIPELINE per-run scratch (per-run fixture copies + per-stage solution
+      # files). Both the in-container path and its host mirror come from the
+      # SAME host bind mount below, so a file the worker writes to
+      # /pipeline-tmp/<x> is visible to the host daemon at
+      # <repo>/pipeline-tmp/<x> — which is what the orchestrator tells the
+      # daemon to bind-mount into stage containers. Without this alignment
+      # every pipeline stage that needs a fixture or solution file fails.
+      PIPELINE_FIXTURES_TMP: /pipeline-tmp
+      PIPELINE_FIXTURES_HOST_TMP: /Users/Vijay/python-leetcode/pipeline-tmp
+      PIPELINE_CODE_EXCHANGE_DIR: /pipeline-tmp
+      PIPELINE_CODE_EXCHANGE_HOST_DIR: /Users/Vijay/python-leetcode/pipeline-tmp
     depends_on:
       - mongodb
       - redis
     volumes:
       - ./backend:/app
-      - ./code-exchange:/code-exchange
+      - code-exchange:/code-exchange
+      # Host pipeline-tmp bind: shared by per-run fixture copies AND
+      # per-stage solution files. Must exist on the host (created on up).
+      - ./pipeline-tmp:/pipeline-tmp
+      # Host pipeline fixtures -> worker, so the orchestrator can read and
+      # copy them into per-run dirs before mounting into stage containers.
+      - ./docker/pipeline-runner/fixtures:/pipeline-fixtures:ro
       - /var/run/docker.sock:/var/run/docker.sock
     restart: on-failure
 

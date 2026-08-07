@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# PythonCode Platform - Deployment Setup Script
+# ETLninja - Deployment Setup Script
 
-echo "🚀 PythonCode Platform - Deployment Setup"
-echo "=========================================="
+echo "🥷 ETLninja - Deployment Setup"
+echo "=================================="
 echo ""
 
 # Check if node_modules exist

@@ -38,7 +38,6 @@ function PipelineReport() {
 
   const fetchRun = useCallback(async () => {
     try {
-      setLoading(true);
       setError(null);
       const res = await pipelinesAPI.getRun(runId);
       setRun(res.data);
@@ -57,14 +56,31 @@ function PipelineReport() {
     }
   }, [runId]);
 
+  // Initial load.
   useEffect(() => {
     if (user?.id) fetchRun();
   }, [fetchRun, user?.id]);
 
+  // Bug #2: pipeline runs are now asynchronous (the orchestrator runs in the
+  // worker, which has Docker access). The POST returns a 'pending' doc
+  // immediately; poll until the worker flips status to 'completed'/'error'.
+  useEffect(() => {
+    if (!run || run.status !== 'pending') return undefined;
+    const interval = setInterval(() => { fetchRun(); }, 2000);
+    return () => clearInterval(interval);
+  }, [run, fetchRun]);
+
   if (!user) return <Navigate to="/login" replace />;
-  if (loading) return <div className="loading">Loading pipeline report...</div>;
+  if (loading && !run) return <div className="loading">Loading pipeline report...</div>;
   if (error) return <div className="error-banner">{error}</div>;
   if (!run) return null;
+  if (run.status === 'pending') {
+    return (
+      <div className="loading">
+        Running pipeline… stages execute in the worker sandbox; this can take a minute or two.
+      </div>
+    );
+  }
 
   const stages = run.stageResults || [];
   const passedStages = stages.filter((s) => s.status === 'passed').length;

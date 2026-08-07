@@ -4,7 +4,7 @@ const PROBLEMS = require('./problems');
 require('dotenv').config();
 
 async function run() {
-  const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/python-leetcode';
+  const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/etlninja';
   try {
     await mongoose.connect(uri, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB:', uri);

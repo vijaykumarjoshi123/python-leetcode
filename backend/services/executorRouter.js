@@ -34,8 +34,11 @@ const EXECUTOR_CONFIG = {
     image: 'pyspark-executor',
     // The runner handles the full lifecycle (copy file, spark-submit, capture
     // stdout, compare /tmp/output/ to /expected/, write JSON). See Section 3B.
+    // Timeout bumped to 120s: the Spark JVM cold start alone eats ~30-40s,
+    // and 60s left no margin for the runner's setup + the user's job under
+    // pipeline concurrency, causing TLEs on otherwise-fine submissions.
     buildCmd: (file) => ['bash', '/runner/spark_runner.sh', file],
-    timeout: 60000,
+    timeout: 120000,
     memoryMb: 1024,
     toolVersion: 'PySpark 3.5',
     useGpu: false,
@@ -43,7 +46,7 @@ const EXECUTOR_CONFIG = {
   dbt: {
     image: 'dbt-executor',
     buildCmd: (file) => ['bash', '/runner/dbt_runner.sh', file],
-    timeout: 30000,
+    timeout: 60000,
     memoryMb: 512,
     toolVersion: 'dbt-core 1.7 (DuckDB adapter)',
     useGpu: false,
@@ -58,8 +61,12 @@ const EXECUTOR_CONFIG = {
   },
   kafka: {
     image: 'kafka-executor',
+    // Timeout bumped to 90s: the runner formats storage, boots Kafka in
+    // KRaft mode, waits for the broker (~20s cold), creates topics, and
+    // seeds messages before the user's script even runs. 30s was too tight
+    // and the stage TLE'd before the user code got a chance to execute.
     buildCmd: (file) => ['bash', '/runner/kafka_runner.sh', file],
-    timeout: 30000,
+    timeout: 90000,
     memoryMb: 512,
     toolVersion: 'Kafka 3.7 (KRaft mode)',
     useGpu: false,
@@ -69,7 +76,7 @@ const EXECUTOR_CONFIG = {
     // The runner handles fixture setup, user script execution, and
     // comparison against /expected/. See Section 3F.
     buildCmd: (file) => ['python3', '/runner/iceberg_runner.py'],
-    timeout: 30000,
+    timeout: 60000,
     memoryMb: 512,
     toolVersion: 'PyIceberg 0.7 / DuckDB (Databricks-Iceberg)',
     useGpu: false,

@@ -1,7 +1,7 @@
 {
-  "name": "python-leetcode-frontend",
+  "name": "etlninja-frontend",
   "version": "1.0.0",
-  "description": "Frontend for Python Leetcode Platform",
+  "description": "Frontend for ETLninja — the data-engineering skills platform",
   "proxy": "http://localhost:5000",
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",

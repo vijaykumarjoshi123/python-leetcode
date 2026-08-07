@@ -1,4 +1,4 @@
-# Getting Started - PythonCode Platform
+# Getting Started - ETLninja
 
 ## 🎯 Quick Start (5 minutes)
 
@@ -44,7 +44,7 @@ npm run dev
 3. Create a cluster (M0 - Free)
 4. Get connection string:
    ```
-   mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/python-leetcode
+   mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/etlninja
    ```
 
 ### Step 2: Deploy Backend (Railway)
@@ -192,4 +192,4 @@ Check REACT_APP_API_URL is set in Vercel environment
 
 ## 🎉 Congratulations!
 
-Your PythonCode platform is now live on the internet! Share the URL with friends and start building the next LeetCode! 🚀
+Your ETLninja platform is now live on the internet! Share the URL and start sharpening data-engineering skills. 🥷🚀

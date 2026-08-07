@@ -1,4 +1,4 @@
-# Project Analysis: Data Engineering Assessment Platform
+# Project Analysis: ETLninja — Data Engineering Assessment Platform
 
 > **Status as of 2026-07-27 — Sections 1, 2, 3, and 4 of the multi-executor build are complete and pushed to `origin/main`.** Sections 5–10 remain. See **§7 Build Status & Resumption** for what's done and what's next.
 
@@ -6,7 +6,7 @@
 
 ## 1. Executive Overview
 
-The project has pivoted from a Python LeetCode-style practice platform into a **technical skills assessment platform for data engineers**. LeetCode, HackerRank, and Codility test toy algorithms and SQL puzzles; companies actually hire data engineers for Spark, dbt, Airflow, Kafka, Snowflake-style SQL, and Iceberg. This platform runs real tool execution inside sandboxed Docker containers so candidates can prove they can do real data engineering work.
+ETLninja is a **technical skills assessment platform for data engineers**. LeetCode, HackerRank, and Codility test toy algorithms and SQL puzzles; companies actually hire data engineers for Spark, dbt, Airflow, Kafka, Snowflake-style SQL, and Iceberg. This platform runs real tool execution inside sandboxed Docker containers so candidates can prove they can do real data engineering work.
 
 ### Target Users
 - **Individuals** (free + paid): data engineers practicing for interviews.

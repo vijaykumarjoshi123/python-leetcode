@@ -19,7 +19,8 @@ RUN wget -q "https://downloads.apache.org/kafka/${KAFKA_VERSION}/kafka_${KAFKA_S
 ENV PATH="/opt/kafka/bin:${PATH}"
 ENV JAVA_HOME=/usr/lib/jvm/default-java
 
-RUN pip install --no-cache-dir kafka-python==2.0.2 confluent-kafka==2.4.0 duckdb==0.10.0 pandas==2.1.0
+# Pin numpy<2: pandas==2.1.0 / duckdb==0.10.0 built against NumPy 1.x.
+RUN pip install --no-cache-dir "numpy<2" kafka-python==2.0.2 confluent-kafka==2.4.0 duckdb==0.10.0 pandas==2.1.0
 
 COPY runner/ /runner/
 

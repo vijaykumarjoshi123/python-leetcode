@@ -19,7 +19,6 @@ const submissionSchema = new mongoose.Schema({
     default: 'Pending'
   },
   runtime: { type: Number }, // in ms
-  gpuRuntime: { type: Number }, // GPU specific runtime for acceleration tracking
   memory: { type: Number }, // in MB
   output: String,
   error: String,

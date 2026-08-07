@@ -4,9 +4,10 @@
 # final image doesn't ship them). The runtime stage copies only
 # production node_modules.
 #
-# Why distroless-ish: we use node:18-alpine as the base because we need
+# Why distroless-ish: we use node:20-alpine as the base because we need
 # `npm` and `bcrypt`/`sharp` are happier on glibc-like environments. We
-# still drop to a non-root user.
+# still drop to a non-root user. Node 20+ is also required by vitest 4
+# (util.styleText), so dev and prod stay on the same major.
 #
 # Build:
 #   docker build -f backend/Dockerfile.prod -t platform-backend:prod backend/
@@ -18,7 +19,7 @@
 #     platform-backend:prod
 
 # ---- Build stage ----
-FROM node:18-alpine AS build
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
@@ -37,7 +38,7 @@ COPY . .
 RUN npm prune --omit=dev
 
 # ---- Runtime stage ----
-FROM node:18-alpine AS runtime
+FROM node:20-alpine AS runtime
 
 # Install tini for proper signal handling (so docker stop propagates SIGTERM
 # to the node process, not PID 1).
@@ -50,7 +51,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app ./
 
-# Run as non-root. node:18-alpine ships with a `node` user (uid 1000).
+# Run as non-root. node:20-alpine ships with a `node` user (uid 1000).
 USER node
 
 ENV NODE_ENV=production \

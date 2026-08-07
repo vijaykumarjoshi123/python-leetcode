@@ -39,7 +39,7 @@
    ```
 6. Set root directory: `backend`
 7. Railway will auto-detect Node.js and deploy!
-8. Copy your backend URL (e.g., `https://python-leetcode-prod.up.railway.app`)
+8. Copy your backend URL (e.g., `https://etlninja-prod.up.railway.app`)
 
 ### Option B: Render.com
 
@@ -48,7 +48,7 @@
 3. Click "New +" → "Web Service"
 4. Connect your GitHub repository
 5. Configure:
-   - **Name**: python-leetcode-api
+   - **Name**: etlninja-api
    - **Environment**: Node
    - **Build Command**: `cd backend && npm install`
    - **Start Command**: `cd backend && npm start`

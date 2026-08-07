@@ -46,16 +46,36 @@ router.get('/', async (req, res) => {
 });
 
 // Get single problem (must be after /categories and /)
+//
+// Security: the detail endpoint MUST NOT leak grading secrets. We project
+// out:
+//   - solution.code        (the reference answer — users solve the problem
+//                            themselves; the explanation/complexity are
+//                            safe to show in a post-solve "Solution" tab)
+//   - hiddenTestCases      (secret grading inputs/outputs)
+// and we filter testCases to only the visible ones (some problems store
+// hidden cases inside testCases with visible:false). Previously this
+// returned the full document to anonymous callers, disclosing every
+// problem's answer.
 router.get('/:id', async (req, res) => {
   try {
     // Validate ObjectId format
     if (!req.params.id.match(/^[0-9a-fA-F]{24}$/)) {
       return res.status(400).json({ msg: 'Invalid problem ID' });
     }
-    const problem = await Problem.findById(req.params.id);
+    const problem = await Problem.findById(req.params.id)
+      .select('-hiddenTestCases -solution.code');
     if (!problem) return res.status(404).json({ msg: 'Problem not found' });
 
-    res.json(problem);
+    // Defensively drop any non-visible test cases (the schema allows
+    // visible:false entries inside testCases too). toObject so we can
+    // mutate before serialising.
+    const doc = problem.toObject();
+    if (Array.isArray(doc.testCases)) {
+      doc.testCases = doc.testCases.filter((tc) => tc.visible !== false);
+    }
+
+    res.json(doc);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

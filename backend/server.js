@@ -9,13 +9,41 @@ dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, { cors: { origin: '*' } });
 
-app.use(cors());
+// CORS hardening (#13 in TESTING_REPORT.md). In development we accept any
+// origin (the CRA dev server, container frontend, etc.); in production we
+// restrict to the configured frontend origin(s) so a random site can't
+// read authenticated responses. Set CORS_ORIGIN to a single origin or a
+// comma-separated list in prod.
+const isProd = process.env.NODE_ENV === 'production';
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map((s) => s.trim())
+  : null;
+const corsOptions = isProd && allowedOrigins
+  ? {
+      origin: (origin, cb) => {
+        // Allow same-origin / no-origin (curl, server-to-server) and any
+        // whitelisted origin; reject the rest.
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        return cb(new Error(`CORS: origin ${origin} not allowed`));
+      },
+    }
+  : {};
+const io = socketIo(server, { cors: { origin: isProd ? (allowedOrigins || '*') : '*' } });
+
+// JWT secret hardening (#14). Refuse to boot in production with the weak
+// default 'secret' — that default let anyone forge tokens. In dev the
+// default is kept so local setup stays zero-config.
+if (isProd && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 16)) {
+  console.error('FATAL: JWT_SECRET must be set to a strong (>=16 char) value in production.');
+  process.exit(1);
+}
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/python-leetcode')
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/etlninja')
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.log('MongoDB connection error:', err));
 
@@ -25,7 +53,6 @@ const problemRoutes = require('./routes/problems');
 const submissionRoutes = require('./routes/submissions');
 const leaderboardRoutes = require('./routes/leaderboard');
 const forumRoutes = require('./routes/forum');
-const tutorRoutes = require('./routes/tutor');
 const hintRoutes = require('./routes/hints');
 const assessmentRoutes = require('./routes/assessments');
 // Tier 3 / Section 11D — pipeline simulator routes. Sibling of the
@@ -42,7 +69,6 @@ app.use('/api/problems', problemRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/forum', forumRoutes);
-app.use('/api/tutor', tutorRoutes);
 app.use('/api/hints', hintRoutes);
 app.use('/api/assessments', assessmentRoutes);
 app.use('/api/pipelines', pipelineRoutes);

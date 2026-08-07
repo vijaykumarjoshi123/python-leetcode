@@ -28,7 +28,12 @@ function Login() {
       const response = await authAPI.login(formData);
       localStorage.setItem('token', response.data.token);
       localStorage.setItem('user', JSON.stringify(response.data.user));
-      navigate('/problems');
+      // Navbar reads its auth state from localStorage inside useEffect(..., [])
+      // — it only re-evaluates on mount, so a plain navigate() leaves the
+      // header still showing "Login / Sign Up" until the next full reload.
+      // window.location.href forces a fresh app load so Navbar remounts
+      // and picks up the new token/user. Same fix applies to Register.
+      window.location.href = '/problems';
     } catch (err) {
       setError(err.response?.data?.msg || err.response?.data?.error || 'Login failed');
     } finally {
@@ -41,7 +46,7 @@ function Login() {
       <div className="auth-container">
         <div className="auth-card">
           <h1>Welcome Back</h1>
-          <p className="auth-subtitle">Sign in to your PythonCode account</p>
+          <p className="auth-subtitle">Sign in to your ETLninja account</p>
 
           {error && <div className="error-message">{error}</div>}
 

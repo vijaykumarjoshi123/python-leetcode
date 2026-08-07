@@ -28,7 +28,7 @@
 
 const mongoose = require('mongoose');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/python-leetcode';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/etlninja';
 const REDIS_URL   = process.env.REDIS_URL   || 'redis://localhost:6379';
 
 async function start() {
@@ -45,6 +45,11 @@ async function start() {
   // Import after mongoose connects so models register correctly.
   console.log('[worker] Starting submission queue worker...');
   require('./services/submissionQueue');
+  // Bug #2: also start the pipeline queue worker. The pipeline orchestrator
+  // spawns executor containers, so it must run in THIS process (the only one
+  // with /var/run/docker.sock mounted). The backend API only enqueues.
+  console.log('[worker] Starting pipeline queue worker...');
+  require('./services/pipelineQueue');
   console.log('[worker] Ready — waiting for jobs');
 
   process.on('SIGTERM', async () => {

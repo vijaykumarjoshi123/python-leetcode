@@ -1,7 +1,7 @@
 {
-  "name": "python-leetcode",
+  "name": "etlninja",
   "version": "1.0.0",
-  "description": "Enterprise Python Coding Practice Platform",
+  "description": "ETLninja — the data-engineering skills platform (Python, SQL, Spark, dbt, Airflow, Kafka, Iceberg)",
   "main": "index.js",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",

@@ -121,6 +121,16 @@ const pipelineRunSchema = new mongoose.Schema({
   },
   stageResults: [stageResultSchema],
   totalRuntimeMs: { type: Number, default: 0 },
+  // Run lifecycle. 'pending' while the worker is executing the pipeline
+  // (pipeline runs go through the worker because only the worker has
+  // Docker-socket access); 'completed' once the orchestrator has written
+  // the final verdict; 'error' if the orchestrator itself blew up. The
+  // frontend report page polls GET /run/:runId until status !== 'pending'.
+  status: {
+    type: String,
+    enum: ['pending', 'completed', 'error'],
+    default: 'completed',
+  },
   // Final verdict. A pipeline passes iff every stage is in
   // ('passed', 'skipped'). Failed/errored stages fail the pipeline.
   passed: { type: Boolean, default: false },

@@ -35,3 +35,14 @@ Thumbs.db
 # Database
 *.db
 *.sqlite
+
+# Runtime scratch — the worker writes per-job solution/test-case files
+# here; they are ephemeral and must never be committed. The pipeline
+# runner also writes per-run fixture copies under /tmp (not committed).
+code-exchange/
+code-exchange-host/
+pipeline-tmp/
+
+# Python bytecode caches (seed helpers, runner dev copies).
+__pycache__/
+*.pyc

@@ -1,8 +1,9 @@
 /**
  * Pipeline routes — Tier 3 / Section 11D.
  *
- *   POST /api/pipelines/run            — submit a pipeline attempt
- *   GET  /api/pipelines/run/:runId     — fetch a past run (owner-only)
+ *   POST /api/pipelines/run            — submit a pipeline attempt (async)
+ *   GET  /api/pipelines/run/:runId     — fetch a run (owner-only); poll
+ *                                         until status !== 'pending'
  *
  * Spec:
  *   - JWT auth required for both routes
@@ -12,25 +13,27 @@
  *     rather than per problem+tool since pipelines are tool-agnostic
  *   - Body shape mirrors the orchestrator's input: { pipelineProblemId,
  *     stageCode, scenarioId }
- *   - Returns the persisted PipelineRun document on success
  *
- * Why no queue (yet): the orchestrator already wraps the entire pipeline
- * run in runWithGuard(), which provides the cross-pipeline concurrency
- * cap. A pipeline takes minutes to complete (Spark startup, Kafka KRaft
- * boot, etc.), and the HTTP client can afford to wait — the response
- * carries the full per-stage verdict so the UI can render immediately.
- * If we later need to decouple (so the UI can poll for progress), 11H
- * can introduce a Bull job here. For 11D's MVP, synchronous is fine.
+ * Why ASYNC (queue) — Bug #2 in TESTING_REPORT.md: the orchestrator spawns
+ * executor containers via `child_process.spawn('docker', ...)`, but this
+ * backend container has NO Docker socket mounted (only the `worker`
+ * service does — that's the whole reason the worker exists). Running
+ * runPipeline() synchronously here made every pipeline fail at stage 1
+ * with "Cannot connect to the Docker daemon". So POST /run now:
+ *   1. pre-allocates a PipelineRun document with status:'pending',
+ *   2. enqueues a BullMQ job consumed by the worker (which has the socket),
+ *   3. returns 202 with the pending doc.
+ * The frontend navigates to /pipelines/run/:runId and polls
+ * GET /run/:runId until status becomes 'completed' (or 'error').
  */
 
 const express = require('express');
-const mongoose = require('mongoose');
 const auth = require('../middleware/auth');
 const PipelineProblem = require('../models/PipelineProblem');
 const PipelineRun = require('../models/PipelineRun');
 const PipelineScenario = require('../models/PipelineScenario');
 const User = require('../models/User');
-const { runPipeline } = require('../services/pipelineOrchestrator');
+const { pipelineQueue } = require('../services/pipelineQueue');
 
 const router = express.Router();
 
@@ -129,26 +132,33 @@ router.post('/run', auth, async (req, res) => {
     console.warn('[pipelines] rate-limit check failed:', err.message);
   }
 
-  // ---- Run the pipeline ----
-  // The orchestrator handles problem loading, scenario resolution,
-  // topo sort, per-stage docker spawning, and persistence. It throws
-  // on unrecoverable orchestrator errors (bad problem, etc.) — those
-  // surface as 500. Per-stage failures are recorded in the returned
-  // document with passed:false.
+  // ---- Enqueue the pipeline run ----
+  // Pre-allocate a PipelineRun document in 'pending' state and enqueue a
+  // BullMQ job. The WORKER process (which has Docker-socket access) consumes
+  // the job, runs the orchestrator, and updates THIS document to
+  // 'completed'/'error'. We return the pending doc (202) immediately; the
+  // frontend polls GET /run/:runId until status !== 'pending'.
   try {
-    const run = await runPipeline({
+    const run = await PipelineRun.create({
+      userId,
+      pipelineProblemId,
+      scenarioId: scenarioId || null,
+      stageCode: stageCode || {},
+      status: 'pending',
+      passed: false,
+    });
+
+    await pipelineQueue.add('run-pipeline', {
+      runId: run._id.toString(),
       pipelineProblemId,
       userId,
       stageCode: stageCode || {},
       scenarioId: scenarioId || null,
     });
-    res.status(201).json(run);
+
+    res.status(202).json(run);
   } catch (err) {
-    // Orchestrator threw — could be "problem not found", "user not
-    // found", invalid DAG shape, or a docker spawn failure that
-    // couldn't even start a container. Bubble up as a 500 with the
-    // orchestrator's message; the frontend can show "could not start".
-    console.error('[pipelines] runPipeline threw:', err);
+    console.error('[pipelines] enqueue failed:', err);
     res.status(500).json({ error: err.message || 'pipeline run failed' });
   }
 });
